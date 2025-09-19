@@ -1,11 +1,11 @@
 # streamlit_app.py
-# Taxonomy Guardian — Brand-Agnostic Brand Accuracy with NEW-suggestions, Match Strength,
-# Family fallback, UPC assists, caching, and an Export NEW Suggestions button.
-APP_VERSION = "TG 1.8 - Terra phrase BEFORE NEW extraction + compound token, stricter overlap, debug counters"
+# Taxonomy Guardian — Brand Accuracy with master mapping, cleaned phrases, heuristics,
+# UPC safety-net (OpenFoodFacts + optional UPCItemDB), and "(UPC Lookup)" strength label.
+# The sidebar "Selected: ..." info box has been removed per request.
 
 import io
-import os
 import re
+import os
 import json
 import time
 from datetime import datetime, timezone
@@ -14,79 +14,69 @@ from typing import List, Tuple, Dict, Optional
 import numpy as np
 import pandas as pd
 
-# ======================================================
-# Streamlit import with graceful fallback (shim for non-Streamlit environments)
-# ======================================================
+# =========================
+# Streamlit import with graceful fallback (to run outside Streamlit)
+# =========================
 try:
     import streamlit as st  # type: ignore
-except Exception:  # Provide a tiny shim so the module can import/run tests without Streamlit
-    class _ExpanderShim:
+except Exception:
+    class _Ctx:
         def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): return False
-    class _CtxShim:
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): return False
-    class _SidebarShim:
-        def header(self, *a, **k): pass
-        def markdown(self, *a, **k): pass
-        def file_uploader(self, *a, **k): return None
-        def selectbox(self, label, options=(), index=0, **k):
-            try: return options[index]
-            except Exception: return None
-        def checkbox(self, label, value=False, **k): return value
-        def number_input(self, *a, **k): return k.get("value", 0)
-        def slider(self, *a, **k): return k.get("value", 0)
-        def button(self, *a, **k): return False
-        def info(self, *a, **k): pass
-        def warning(self, *a, **k): pass
-        def error(self, *a, **k): pass
-    class _StShim:
+        def __exit__(self, a,b,c): return False
+    class _SB:
+        def header(self,*a,**k): pass
+        def markdown(self,*a,**k): pass
+        def file_uploader(self,*a,**k): return None
+        def selectbox(self,*a,**k): return None
+        def checkbox(self,*a,**k): return False
+        def number_input(self,*a,**k): return 200
+        def slider(self,*a,**k): return 0.15
+        def button(self,*a,**k): return False
+        def info(self,*a,**k): pass
+        def warning(self,*a,**k): pass
+        def error(self,*a,**k): pass
+    class _St:
         def __init__(self):
+            self.sidebar = _SB()
             self.session_state = {}
-            self.sidebar = _SidebarShim()
             self.secrets = {}
         def set_page_config(self, *a, **k): pass
-        def columns(self, spec): return _CtxShim(), _CtxShim()
-        def image(self, *a, **k): pass
-        def write(self, *a, **k): pass
-        def title(self, *a, **k): pass
-        def caption(self, *a, **k): pass
-        def header(self, *a, **k): pass
-        def subheader(self, *a, **k): pass
-        def dataframe(self, *a, **k): pass
-        def json(self, *a, **k): pass
-        def info(self, *a, **k): pass
-        def warning(self, *a, **k): pass
-        def error(self, *a, **k): pass
-        def download_button(self, *a, **k): pass
-        def button(self, *a, **k): return False
-        def expander(self, *a, **k): return _ExpanderShim()
+        def image(self,*a,**k): pass
+        def title(self,*a,**k): pass
+        def caption(self,*a,**k): pass
+        def header(self,*a,**k): pass
+        def subheader(self,*a,**k): pass
+        def dataframe(self,*a,**k): pass
+        def json(self,*a,**k): pass
+        def info(self,*a,**k): pass
+        def warning(self,*a,**k): pass
+        def error(self,*a,**k): pass
+        def download_button(self,*a,**k): pass
+        def expander(self,*a,**k): return _Ctx()
         def cache_data(self, *c, **ck):
             def deco(fn): return fn
             return deco
-        def spinner(self, *a, **k): return _CtxShim()
-    st = _StShim()  # type: ignore
+        def spinner(self, *a, **k): return _Ctx()
+        def columns(self, *a, **k): return _Ctx(), _Ctx()
+    st = _St()  # type: ignore
 
 # =========================
-# App Config
+# App config / header
 # =========================
-st.set_page_config(page_title="Taxonomy_Guardian", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Taxonomy Guardian", page_icon="🛡️", layout="wide")
 
-# =========================
-# Header
-# =========================
 try:
-    c1, c2 = st.columns([0.15, 0.85])
+    c1, c2 = st.columns([0.18, 0.82])
     with c1:
         st.image("Taxonomy_Guardian.png", use_container_width=True)
     with c2:
         st.title("Taxonomy Guardian")
-        st.caption("Ensuring the Fetch Taxonomy remains our source of truth! — " + APP_VERSION)
+        st.caption("Ensuring the Fetch Taxonomy remains our source of truth")
 except Exception:
     st.title("Taxonomy Guardian")
 
 # =========================
-# Session logs
+# Logs
 # =========================
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
@@ -101,10 +91,11 @@ def clear_logs():
     st.session_state["logs"] = []
 
 # =========================
-# Columns and constants
+# Columns / constants
 # =========================
 REQUIRED_COLUMNS = [
-    "FIDO","BARCODE","CATEGORY_HIERARCHY","CATEGORY_1","CATEGORY_2","CATEGORY_3","CATEGORY_4","DESCRIPTION","MANUFACTURER","BRAND","FIDO_TYPE",
+    "FIDO","BARCODE","CATEGORY_HIERARCHY","CATEGORY_1","CATEGORY_2","CATEGORY_3","CATEGORY_4",
+    "DESCRIPTION","MANUFACTURER","BRAND","FIDO_TYPE",
 ]
 
 OUTPUT_COLUMNS = [
@@ -115,10 +106,21 @@ OUTPUT_COLUMNS = [
 
 GENERIC_BRAND_TERMS = {"generic","unknown","n/a","na","misc","private label"}
 
-# For filtering bad suggestions
-_GENERIC_SINGLE_BRAND_TOKENS = {"garden","fitness","beauty","baby","wine","sports","snacks"}
+_UNITS = {
+    "ml","oz","fl","floz","ct","pack","pk","pk.","3pk","6pk","12pk","case","g","kg","lb","lbs"
+}
+_FORM_WORDS = {
+    "frozen","roasted","garlic","powder","capsules","tablet","tablets","softgels","gummy","gummies",
+    "ravioli","sauce","mix","assorted","variety","single","multi","bottle","bottles","can","cans",
+    "pods","k-cup","kcup","kcups","keurig","ground","whole","bean","beans"
+}
+_DECOR_NOISE = {
+    "halloween","witch","party","led","lights","mini","battery","powered","outdoor","yard","garden",
+    "tree","black","red","purple"
+}
 
-# For NEW extraction stopwords
+GENERIC_SINGLE_BRAND_TOKENS = {"garden","fitness","beauty","baby","wine","sports","snacks"}
+
 _NEW_STOPWORDS = set([
     "pack","size","flavor","assorted","variety","brand","product","item","mix","mixed",
     "cabernet","sauvignon","merlot","pinot","noir","chardonnay","red","white","rosé","rose",
@@ -163,40 +165,34 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # =========================
-# Tokenization and fuzzy helpers
+# Tokenization / fuzzy helpers
 # =========================
 def _tg_tokenize(text: str) -> List[str]:
     s = str(text or "").lower()
     return [t for t in re.split(r"[^a-z0-9]+", s) if t]
 
 def _tg_lev1(a: str, b: str) -> int:
-    if a == b:
-        return 0
-    if abs(len(a) - len(b)) > 1:
-        return 2
+    if a == b: return 0
+    if abs(len(a)-len(b)) > 1: return 2
     m, n = len(a), len(b)
-    if m > n:
-        a, b = b, a
-        m, n = n, m
-    prev = list(range(n + 1))
-    for i in range(1, m + 1):
-        cur = [i] + [0] * n
-        ai = a[i - 1]
-        for j in range(1, n + 1):
-            cost = 0 if ai == b[j - 1] else 1
-            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+    if m > n: a, b, m, n = b, a, n, m
+    prev = list(range(n+1))
+    for i in range(1, m+1):
+        cur = [i] + [0]*n
+        ai = a[i-1]
+        for j in range(1, n+1):
+            cost = 0 if ai == b[j-1] else 1
+            cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
         prev = cur
-        if min(prev) > 1:
-            return 2
+        if min(prev) > 1: return 2
     return prev[-1]
 
 def _tg_vowel_eq(a: str, b: str) -> bool:
     strip = lambda x: re.sub(r"[aeiou]", "", x)
-    return strip(a) == strip(b) and len(a) > 3 and len(b) > 3
+    return strip(a) == strip(b) and len(a)>3 and len(b)>3
 
 def _tg_whole_phrase(text: str, phrase: str) -> bool:
-    if not phrase:
-        return False
+    if not phrase: return False
     patt = r"(?<![a-z0-9])" + re.escape(phrase.lower()) + r"(?![a-z0-9])"
     return re.search(patt, str(text).lower()) is not None
 
@@ -206,8 +202,6 @@ def _normalize_for_phrase_scan(text: str) -> str:
 def _title_case_brand(phrase: str) -> str:
     return " ".join(w.capitalize() for w in str(phrase).split())
 
-# NEW helper: strip corporate suffixes for cleaner phrases
-
 def _tg_strip_corp_suffix(phrase: str) -> str:
     suffixes = {"co","co.","inc","inc.","llc","l.l.c.","ltd","ltd.","corp","corp.","company"}
     parts = str(phrase).strip().split()
@@ -216,26 +210,45 @@ def _tg_strip_corp_suffix(phrase: str) -> str:
     return " ".join(parts)
 
 # =========================
-# Family detection for fallback only
+# Phrase cleaner (caps to 2–3 tokens, strips units/forms/decor noise)
+# =========================
+def _tg_clean_phrase(core: str) -> str:
+    tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9]+", core)]
+    cleaned = []
+    for t in tokens:
+        tl = t.lower()
+        if tl in _UNITS or tl in _FORM_WORDS or tl in _DECOR_NOISE:
+            continue
+        cleaned.append(t)
+        if len(cleaned) >= 3:
+            break
+    if not cleaned:
+        return ""
+    out = " ".join(cleaned)
+    out = _tg_strip_corp_suffix(out)
+    return _title_case_brand(out)
+
+# =========================
+# Family (heuristic) detector — low confidence fallback
 # =========================
 def _tg_detect_family(text: str) -> Optional[str]:
     t = str(text or "").lower()
-    if any(w in t for w in ["wine","merlot","cabernet","pinot","chardonnay"]):
+    if any(w in t for w in ["wine","merlot","cabernet","pinot","chardonnay","sauvignon","syrah","rioja","tempranillo"]):
         return "Wine"
-    if any(w in t for w in ["saucer","planter","pot","garden","soil","hose"]):
-        return "Garden Supplies"
-    if any(w in t for w in ["treadmill","exercise","fitness","bike","elliptical"]):
+    if any(w in t for w in ["decor","decoration","halloween","witch","ornament","garland","lights"]):
+        return "Decor"
+    if any(w in t for w in ["capsule","capsules","powder","gummy","gummies","supplement","supplements"]):
+        return "Supplements"
+    if any(w in t for w in ["tile","marble","terrazzo","ceramic","porcelain","granite","sample"]):
+        return "Tile"
+    if any(w in t for w in ["fitness","treadmill","exercise","bike","belt"]):
         return "Fitness"
-    if any(w in t for w in ["chips","crisps","trail mix","nuts"]):
-        return "Snacks"
-    if any(w in t for w in ["lotion","serum","beauty","cream"]):
-        return "Beauty"
-    if any(w in t for w in ["diaper","stroller","baby"]):
-        return "Baby"
+    if any(w in t for w in ["coffee","keurig","k-cup","kcup","kcups","ground","espresso"]):
+        return "Coffee"
     return None
 
 # =========================
-# Master brand index and NEW extraction
+# Master brand index + NEW extraction
 # =========================
 def _tg_master_brands(brand_df: Optional[pd.DataFrame]) -> set:
     if brand_df is None or "BRAND" not in brand_df.columns:
@@ -252,10 +265,12 @@ def _tg_brand_token_index(brand_df: Optional[pd.DataFrame]):
             idx.append((b, toks))
     return idx
 
-def _tg_map_to_master(raw_brand: str, master: set) -> Optional[str]:
+def _tg_map_to_master(raw_brand: Optional[str], master: set) -> Optional[str]:
     if not raw_brand:
         return None
     rb = re.sub(r"[^a-z0-9 ]+", " ", str(raw_brand).lower()).strip()
+    if not rb:
+        return None
     if rb in master:
         return rb
     rb2 = re.sub(r"\s+", " ", rb)
@@ -274,13 +289,6 @@ def _tg_map_to_master(raw_brand: str, master: set) -> Optional[str]:
     return None
 
 def _tg_extract_new_brand(desc: str) -> Optional[str]:
-    """
-    Extract brand-like phrases from DESCRIPTION only:
-      - "X by Y"  → Terra by Battat
-      - root + Fitness  → Xterra Fitness
-      - 2–4 token phrases → Bloem Terra, Terra Cotta Pasta
-    Returns Title Case or None.
-    """
     if not desc:
         return None
     s = _normalize_for_phrase_scan(desc)
@@ -297,15 +305,13 @@ def _tg_extract_new_brand(desc: str) -> Optional[str]:
         root = m.group(1)
         return _title_case_brand(f"{root} Fitness")
 
-    # 2–4 tokens
+    # 2–3 tokens (conservative)
     tokens = re.findall(r"\b([A-Za-z][A-Za-z0-9]+)\b", s)
     best = None
     best_len = 0
-    for n in (4, 3, 2):
+    for n in (3, 2):
         for i in range(len(tokens) - n + 1):
             window = tokens[i:i+n]
-            if n == 2 and window[1].lower() == "fitness":
-                return _title_case_brand(" ".join(window))
             filtered = [t for t in window if t.lower() not in _NEW_STOPWORDS]
             if not filtered:
                 continue
@@ -318,7 +324,7 @@ def _tg_extract_new_brand(desc: str) -> Optional[str]:
     return _title_case_brand(best) if best else None
 
 # =========================
-# UPC lookups
+# UPC lookups (OFF first; then UPCItemDB if available in secrets)
 # =========================
 def _get_secret(key: str, default=None):
     try:
@@ -378,7 +384,7 @@ class _TGUPC:
                     except Exception:
                         brand = None
                     if brand:
-                        out[b] = {"brand": brand}
+                        out[b] = {"source":"OFF","brand": brand}
                 elif r.status_code in (429, 500, 502, 503):
                     time.sleep(0.75)
             except Exception:
@@ -411,7 +417,7 @@ class _TGUPC:
                     except Exception:
                         brand = None
                     if brand:
-                        out[b] = {"brand": brand}
+                        out[b] = {"source":"UPCItemDB","brand": brand}
                 elif r.status_code in (429, 500, 502, 503):
                     time.sleep(0.75)
             except Exception:
@@ -439,7 +445,7 @@ def brand_accuracy_cleanup(
     sb = str(selected_brand or "").strip()
     sb_lower = sb.lower()
 
-    # Allowed types for belonging
+    # Allowed product types from master (for selected brand only)
     allowed_types: List[str] = []
     if brand_df is not None and {"ALLOWED_PRODUCT_TYPES","BRAND"}.issubset(brand_df.columns):
         hits = brand_df[brand_df["BRAND"].astype(str).str.lower() == sb_lower]
@@ -448,12 +454,10 @@ def brand_accuracy_cleanup(
             if raw:
                 allowed_types = sorted({t.strip().lower() for t in raw.split(",") if t.strip()})
 
-    # Missing or generic brand mask
     brand_norm_lower = df["BRAND"].astype(str).str.strip().str.lower()
     nullish = {"", "none", "null", "nan", "n/a", "na"}
     mask_generic = brand_norm_lower.isin(nullish) | brand_norm_lower.isin(GENERIC_BRAND_TERMS) | df["BRAND"].isna()
 
-    # DESCRIPTION only for suggestions
     desc_col = df["DESCRIPTION"].astype(str)
 
     def belongs_to_selected(text: str) -> bool:
@@ -473,12 +477,9 @@ def brand_accuracy_cleanup(
     master_brands = _tg_master_brands(brand_df)
     brand_index = _tg_brand_token_index(brand_df)
 
-    upc_needed: List[Tuple[int, str]] = []
     suggestions: List[str] = []
     strengths: List[str] = []
-
-    # debug counters
-    c_new = c_phrase = c_family = c_exact = c_overlap = c_upc = c_unclear = 0
+    upc_needed: List[Tuple[int, str]] = []
 
     for idx, row in df.iterrows():
         desc = str(row.get("DESCRIPTION", ""))
@@ -490,126 +491,57 @@ def brand_accuracy_cleanup(
             strengths.append("High")
             continue
 
-        made = False  # did we emit a suggestion yet for this row?
+        # ---- 1) Master mapping from description (exact/near) ----
+        best_brand, best_len = None, 0
+        for b in master_brands:
+            if _tg_whole_phrase(desc_lower, b):
+                if b.strip().lower() == sb_lower:
+                    continue
+                if len(b) > best_len:
+                    best_brand, best_len = b, len(b)
+        if best_brand:
+            suggestions.append(best_brand.title())
+            strengths.append("High")
+            continue
 
-        # 1) SelectedBrand plus phrase or family (FIRST!)
-        # treat Terra compounds like "TerraCotta" as a brand mention too (use original-cased desc)
-        brand_mention = _tg_whole_phrase(desc_lower, sb_lower) or bool(re.search(rf"\b{re.escape(sb)}[A-Z]", desc))
-        if brand_mention and not made:
-            scan = _normalize_for_phrase_scan(desc)
+        # ---- 2) SelectedBrand + cleaned phrase (up to 3 tokens) ----
+        if _tg_whole_phrase(desc_lower, sb_lower):
             m2 = re.search(
-                rf"(?i)\b{re.escape(sb)}\s+([A-Za-z][A-Za-z0-9]+(?:\s+[A-Za-z][A-Za-z0-9]+){0,3})",
-                scan,
+                rf"\b{re.escape(sb)}\s+([A-Za-z][A-Za-z0-9]+(?:\s+[A-Za-z][A-Za-z0-9]+){{0,3}})",
+                desc_norm,
+                flags=re.IGNORECASE,
             )
             if m2:
                 raw_tail = m2.group(1)
-                TAIL_DENY = {
-                    "pack","size","adult","supplements","beauty","hair","skin","nails",
-                    "case","belt","iphone","capsules","tablets","powder","pwd","mix",
-                    "estate","cellars"
-                }
-                tail_tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9]+", raw_tail) if t.lower() not in TAIL_DENY]
-                if tail_tokens:
-                    candidate = _tg_strip_corp_suffix(f"{sb} {' '.join(tail_tokens)}").strip()
-                    cand_lower = candidate.lower()
-
-                    if cand_lower != sb_lower:
-                        mapped = _tg_map_to_master(candidate, master_brands)
-                        if mapped and mapped.strip().lower() != sb_lower:
-                            suggestions.append(mapped.title())
-                            strengths.append("High")
-                            c_phrase += 1
-                            made = True
-                        else:
-                            suggestions.append(f"{_title_case_brand(candidate)} (NEW)")
-                            strengths.append("Medium")
-                            c_phrase += 1
-                            made = True
-            if not made:
-                fam = _tg_detect_family(desc)
-                if fam:
-                    suggestions.append(f"{sb} {fam}")
-                    strengths.append("Low")
-                    c_family += 1
-                    made = True
-
-        # 2) NEW brand extraction — only if we didn't emit from phrase/family
-        if not made:
-            new_phrase = _tg_extract_new_brand(desc_norm)
-            if new_phrase:
-                mapped = _tg_map_to_master(new_phrase, master_brands)
-                if mapped:
-                    if mapped.strip().lower() != sb_lower:
+                cleaned = _tg_clean_phrase(f"{sb} {raw_tail}")
+                if cleaned and cleaned.lower() != sb_lower:
+                    mapped = _tg_map_to_master(cleaned, master_brands)
+                    if mapped and mapped.strip().lower() != sb_lower:
                         suggestions.append(mapped.title())
                         strengths.append("High")
-                        c_new += 1
-                        made = True
-                else:
-                    suggestions.append(f"{new_phrase} (NEW)")
-                    strengths.append("Medium")
-                    c_new += 1
-                    made = True
-
-        # 3) Master exact phrase hit
-        if not made:
-            best_brand, best_len = None, 0
-            for b in master_brands:
-                if _tg_whole_phrase(desc_lower, b):
-                    if b.strip().lower() == sb_lower:
                         continue
-                    if len(b) > best_len:
-                        best_brand, best_len = b, len(b)
-            if best_brand:
-                suggestions.append(best_brand.title())
-                strengths.append("High")
-                c_exact += 1
-                made = True
+                    else:
+                        suggestions.append(f"{cleaned} (NEW)")
+                        strengths.append("Medium")
+                        continue
 
-        # 4) Master token overlap (stricter acceptance)
-        if not made:
-            desc_tokens = set(_tg_tokenize(desc_lower))
-            best_b = None
-            best_score = -999
-            best_len2 = 0
-            best_toks_len = 0
-            for b, toks in brand_index:
-                overlap = len(toks & desc_tokens)
-                token_bonus = 1 if len(toks) > 1 else 0
-                if b.strip().lower() == sb_lower:
-                    continue
-                generic_penalty = -2 if (len(toks) == 1 and next(iter(toks)) in _GENERIC_SINGLE_BRAND_TOKENS) else 0
-                score = overlap + token_bonus + generic_penalty
-                if score > best_score or (score == best_score and len(b) > best_len2):
-                    best_b, best_score, best_len2, best_toks_len = b, score, len(b), len(toks)
-            if best_b and (best_score >= 2 or (best_score == 1 and best_toks_len > 1)):
-                suggestions.append(best_b.title())
-                strengths.append("High" if best_score >= 3 else "Medium")
-                c_overlap += 1
-                made = True
+        # ---- 3) Heuristic fallback (low confidence) ----
+        fam = _tg_detect_family(desc)
+        if fam:
+            suggestions.append(f"{selected_brand} {fam}")
+            strengths.append("Low")
+        else:
+            suggestions.append("")
+            strengths.append("")
 
-        # 5) UPC assist
-        if not made:
-            bc = str(row.get("BARCODE", "")).strip()
-            if bc and bc.isdigit() and len(bc) >= 8:
-                upc_needed.append((idx, bc))
-                suggestions.append("")
-                strengths.append("Low")
-                c_upc += 1
-                made = True
+        # ---- 4) UPC lookup (safety net) ----
+        bc = str(row.get("BARCODE", "")).strip()
+        need_upc = (bc and bc.isdigit() and len(bc) >= 8)
+        already_have = bool(suggestions[-1]) and suggestions[-1] not in ("", "Unclear")
+        if need_upc and not already_have:
+            upc_needed.append((idx, bc))
 
-        # 6) Family fallback last resort
-        if not made:
-            fam = _tg_detect_family(desc)
-            if fam:
-                suggestions.append(f"{selected_brand} {fam}")
-                strengths.append("Low")
-                c_family += 1
-            else:
-                suggestions.append("Unclear")
-                strengths.append("Low")
-                c_unclear += 1
-
-    # UPC pass
+    # UPC pass (batch)
     if upc_needed:
         prov = _TGUPC()
         uniq = sorted(set(bc for _, bc in upc_needed))
@@ -617,30 +549,44 @@ def brand_accuracy_cleanup(
         by_bc: Dict[str, List[int]] = {}
         for i, bc in upc_needed:
             by_bc.setdefault(bc, []).append(i)
-        if results:
-            for bc, info in results.items():
-                raw = (info or {}).get("brand")
-                mapped = _tg_map_to_master(raw, master_brands)
-                label = (mapped.title() if mapped else (str(raw).title() if raw else None))
-                if label:
-                    for i in by_bc.get(bc, []):
-                        if not suggestions[i]:
-                            if str(label).strip().lower() == sb_lower and df.iloc[i]["Correct Brand?"] == "N":
-                                continue
-                            suggestions[i] = label if mapped else f"{label} (NEW)"
-                            strengths[i] = "High"
-        for i, s in enumerate(suggestions):
-            if s == "":
-                suggestions[i] = "Unclear"
-                strengths[i] = "Low"
-                c_unclear += 1
 
-    # Final filters
+        for bc, info in results.items():
+            raw = (info or {}).get("brand")
+            mapped = _tg_map_to_master(raw, master_brands)
+            label = (mapped.title() if mapped else (_title_case_brand(str(raw)) if raw else None))
+            for i in by_bc.get(bc, []):
+                if not label:
+                    continue
+                if not suggestions[i] or strengths[i] in ("", "Low"):
+                    suggestions[i] = label if mapped else f"{label} (NEW)"
+                    base_strength = "High" if mapped else "Medium"
+                    strengths[i] = f"{base_strength} (UPC Lookup)"
+
+    # Fill remaining rows (NEW / Unclear)
+    for i in range(len(suggestions)):
+        if suggestions[i]:
+            continue
+        desc = str(df.iloc[i].get("DESCRIPTION", ""))
+        new_phrase = _tg_extract_new_brand(_normalize_for_phrase_scan(desc))
+        if new_phrase:
+            mapped = _tg_map_to_master(new_phrase, master_brands)
+            if mapped and mapped.strip().lower() != sb_lower:
+                suggestions[i] = mapped.title()
+                strengths[i] = "Medium"
+                continue
+            elif new_phrase.lower() != sb_lower:
+                suggestions[i] = f"{new_phrase} (NEW)"
+                strengths[i] = "Medium"
+                continue
+        suggestions[i] = "Unclear"
+        strengths[i] = "Low"
+
+    # Final filters: block generic single tokens and base brand on N rows
     for i, s in enumerate(suggestions):
         if not s or s == "Unclear":
             continue
         base = s.replace(" (NEW)", "").strip()
-        if base.lower() in _GENERIC_SINGLE_BRAND_TOKENS:
+        if base.lower() in GENERIC_SINGLE_BRAND_TOKENS:
             suggestions[i] = "Unclear"
             strengths[i] = "Low"
             continue
@@ -656,17 +602,23 @@ def brand_accuracy_cleanup(
 
     # Ensure Y rows have blank suggestion
     df.loc[df["Correct Brand?"].eq("Y"), "Suggested Brand"] = ""
+    df.loc[df["Correct Brand?"].eq("Y"), "Match Strength"] = "High"
 
-    # Logs — single compact line so you can verify the path mix without UI widgets
-    log_event("INFO", "Brand path counters", counts={
-        "NEW": int(c_new), "PHRASE": int(c_phrase), "FAMILY": int(c_family),
-        "EXACT": int(c_exact), "OVERLAP": int(c_overlap), "UPC": int(c_upc), "UNCLEAR": int(c_unclear)
-    })
-
+    # Logs
+    changed = df[df["Correct Brand?"].eq("N")]
+    for _, r in changed.head(max_logs).iterrows() if log_changes_only else changed.iterrows():
+        log_event(
+            "INFO", "Brand check (final)",
+            fido=str(r.get("FIDO")),
+            brand=str(r.get("BRAND")),
+            desc=str(r.get("DESCRIPTION"))[:200],
+            suggested=str(r.get("Suggested Brand")),
+            strength=str(r.get("Match Strength")),
+        )
     return df
 
 # =========================
-# Minimal stubs for other cleanups
+# Other cleanups
 # =========================
 def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -684,7 +636,7 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 # =========================
-# Cached I O
+# Cached I/O
 # =========================
 @st.cache_data(show_spinner=False)
 def _read_brand_mfr_xlsx(path_or_buffer) -> Optional[pd.DataFrame]:
@@ -705,7 +657,8 @@ def _get_top50_and_brand_lists(brand_df: pd.DataFrame) -> Tuple[List[str], Dict[
     mf_series = brand_df["MANUFACTURER"].dropna().astype(str)
     top_50 = mf_series.value_counts().head(50).index.tolist()
     by_mfr: Dict[str, List[str]] = (
-        brand_df.dropna(subset=["MANUFACTURER","BRAND"]).groupby("MANUFACTURER")["BRAND"].apply(lambda s: sorted(s.astype(str).unique())).to_dict()
+        brand_df.dropna(subset=["MANUFACTURER","BRAND"]).groupby("MANUFACTURER")["BRAND"]
+        .apply(lambda s: sorted(s.astype(str).unique())).to_dict()
     )
     return top_50, by_mfr
 
@@ -719,22 +672,15 @@ def _read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
         return pd.read_excel(BytesIO(file_bytes))
 
 # =========================
-# Sidebar controls
+# Sidebar controls (info box removed)
 # =========================
-def load_brand_mfr_reference(sidebar=True) -> Optional[pd.DataFrame]:
-    brand_df = _read_brand_mfr_xlsx("All_Brands_Manufacturers.xlsx")
-    if brand_df is None and sidebar:
-        st.sidebar.markdown("##### Load Brand–Manufacturer Reference")
-        uploaded_ref = st.sidebar.file_uploader("Upload All_Brands_Manufacturers.xlsx", type=["xlsx","xls"], key="brand_mfr_uploader")
-        if uploaded_ref is not None:
-            brand_df = _read_brand_mfr_xlsx(uploaded_ref)
-            if brand_df is None:
-                st.sidebar.error("Failed to read reference file.")
-    return brand_df
-
 def sidebar_controls(brand_df: Optional[pd.DataFrame]):
     st.sidebar.header("Inputs")
-    uploaded = st.sidebar.file_uploader("Upload data file (from Snowflake export)", type=["xlsx","xls","csv"], key="data_upl")
+    uploaded = st.sidebar.file_uploader(
+        "Upload data file (from Snowflake export)",
+        type=["xlsx","xls","csv"],
+        key="data_upl"
+    )
 
     if uploaded is not None:
         file_bytes = uploaded.getvalue()
@@ -744,7 +690,11 @@ def sidebar_controls(brand_df: Optional[pd.DataFrame]):
             st.session_state["_raw_df"] = _read_user_file(uploaded.name, file_bytes)
     raw_df = st.session_state.get("_raw_df")
 
-    cleanup_choice = st.sidebar.selectbox("Type of cleanup", ["Brand Accuracy","Category Hierarchy Cleanup","Vague Description Cleanup"], index=0)
+    cleanup_choice = st.sidebar.selectbox(
+        "Type of cleanup",
+        ["Brand Accuracy","Category Hierarchy Cleanup","Vague Description Cleanup"],
+        index=0
+    )
 
     selected_mfr = selected_brand = None
     if cleanup_choice == "Brand Accuracy":
@@ -759,12 +709,11 @@ def sidebar_controls(brand_df: Optional[pd.DataFrame]):
             if selected_mfr:
                 brand_options = by_mfr.get(selected_mfr, [])
             selected_brand = st.sidebar.selectbox("Select Brand", options=brand_options)
-            st.sidebar.info(f"Selected: **{selected_brand}** (Manufacturer: **{selected_mfr}**) — {APP_VERSION}" )
         else:
             st.sidebar.warning("Load the Brand–Manufacturer reference to enable selections.")
 
     st.sidebar.markdown("#### Runtime Controls")
-    log_changes_only = st.sidebar.checkbox("Log only changed or flagged rows", value=True)
+    log_changes_only = st.sidebar.checkbox("Log only changed/flagged rows", value=True)
     max_logs = st.sidebar.number_input("Max rows to log", min_value=50, max_value=2000, value=200, step=50)
     min_interval = st.sidebar.slider("Min interval between external calls (sec)", 0.0, 1.0, 0.15, 0.05)
     run = st.sidebar.button("Run Cleanup", use_container_width=True)
@@ -772,11 +721,11 @@ def sidebar_controls(brand_df: Optional[pd.DataFrame]):
     return uploaded, raw_df, cleanup_choice, selected_mfr, selected_brand, log_changes_only, max_logs, min_interval, run
 
 # =========================
-# Results rendering after run only
+# Results rendering
 # =========================
 def show_results(cleaned: pd.DataFrame):
     st.subheader("Results")
-    st.dataframe(cleaned.head(200), use_container_width=True)
+    st.dataframe(cleaned.head(300), use_container_width=True)
 
     out_buf = io.BytesIO()
     with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
@@ -814,7 +763,7 @@ def main():
 
     uploaded, raw_df, cleanup_choice, selected_mfr, selected_brand, log_changes_only, max_logs, min_interval, run = sidebar_controls(brand_df)
 
-    st.subheader("Results")
+    st.subheader("Run")
 
     if uploaded is None or raw_df is None:
         st.info("Upload a data file to begin.")
@@ -825,7 +774,7 @@ def main():
         return
 
     if not run:
-        st.caption("File loaded. Choose settings and click Run Cleanup to process.")
+        st.caption("File loaded. Choose settings and click **Run Cleanup** to process.")
         with st.expander("Logs", expanded=False):
             logs = st.session_state.get("logs", [])[-200:]
             st.json(logs)
@@ -840,7 +789,7 @@ def main():
 
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
-        st.warning(f"Missing required columns auto filled as empty: {', '.join(missing)}")
+        st.warning(f"Missing required columns (auto-filled as empty): {', '.join(missing)}")
 
     cleaned = df.copy()
 
@@ -871,8 +820,5 @@ def main():
         st.json(logs)
     st.button("Clear logs", on_click=clear_logs)
 
-# =========================
-# Entrypoint
-# =========================
 if __name__ == "__main__":
     main()
