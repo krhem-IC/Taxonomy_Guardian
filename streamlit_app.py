@@ -427,6 +427,61 @@ class _TGUPC:
         return [b for b in barcodes if b not in out]
 
 # =========================
+# Load Brand–Manufacturer reference  ✅ (restored)
+# =========================
+@st.cache_data(show_spinner=False)
+def _read_brand_mfr_xlsx(path_or_buffer) -> Optional[pd.DataFrame]:
+    try:
+        df = pd.read_excel(path_or_buffer)
+        df = df.rename(columns={c: c.strip().upper() for c in df.columns})
+        for c in ["BRAND","MANUFACTURER","WEBSITE","ALLOWED_PRODUCT_TYPES"]:
+            if c in df.columns:
+                df[c] = df[c].astype(str).str.strip()
+        return df
+    except Exception:
+        return None
+
+def load_brand_mfr_reference(sidebar=True) -> Optional[pd.DataFrame]:
+    # First try the copy that’s bundled in the repo
+    brand_df = _read_brand_mfr_xlsx("All_Brands_Manufacturers.xlsx")
+    if brand_df is None and sidebar:
+        st.sidebar.markdown("##### Load Brand–Manufacturer Reference")
+        uploaded_ref = st.sidebar.file_uploader(
+            "Upload All_Brands_Manufacturers.xlsx",
+            type=["xlsx","xls"],
+            key="brand_mfr_uploader"
+        )
+        if uploaded_ref is not None:
+            brand_df = _read_brand_mfr_xlsx(uploaded_ref)
+            if brand_df is None:
+                st.sidebar.error("Failed to read reference file.")
+    return brand_df
+
+# =========================
+# Other cached I/O
+# =========================
+@st.cache_data(show_spinner=False)
+def _get_top50_and_brand_lists(brand_df: pd.DataFrame) -> Tuple[List[str], Dict[str, List[str]]]:
+    if brand_df is None or brand_df.empty:
+        return [], {}
+    mf_series = brand_df["MANUFACTURER"].dropna().astype(str)
+    top_50 = mf_series.value_counts().head(50).index.tolist()
+    by_mfr: Dict[str, List[str]] = (
+        brand_df.dropna(subset=["MANUFACTURER","BRAND"]).groupby("MANUFACTURER")["BRAND"]
+        .apply(lambda s: sorted(s.astype(str).unique())).to_dict()
+    )
+    return top_50, by_mfr
+
+@st.cache_data(show_spinner=False)
+def _read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    from io import BytesIO, StringIO
+    name = (file_name or "").lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(StringIO(file_bytes.decode("utf-8", errors="ignore")))
+    else:
+        return pd.read_excel(BytesIO(file_bytes))
+
+# =========================
 # Brand Accuracy
 # =========================
 def brand_accuracy_cleanup(
@@ -475,7 +530,6 @@ def brand_accuracy_cleanup(
     df.loc[:, "Correct Brand?"] = np.where(mask_generic | ~df["_belongs"], "N", "Y")
 
     master_brands = _tg_master_brands(brand_df)
-    brand_index = _tg_brand_token_index(brand_df)
 
     suggestions: List[str] = []
     strengths: List[str] = []
@@ -634,42 +688,6 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     generic_hits = desc.str.contains(r"\b(assorted|variety pack|misc|pack of|item|product|brand|flavor|size|mixed|n/a)\b", regex=True)
     df.loc[:, "Vague Description?"] = np.where(generic_hits, "Y", df.get("Vague Description?","N"))
     return df
-
-# =========================
-# Cached I/O
-# =========================
-@st.cache_data(show_spinner=False)
-def _read_brand_mfr_xlsx(path_or_buffer) -> Optional[pd.DataFrame]:
-    try:
-        df = pd.read_excel(path_or_buffer)
-        df = df.rename(columns={c: c.strip().upper() for c in df.columns})
-        for c in ["BRAND","MANUFACTURER","WEBSITE","ALLOWED_PRODUCT_TYPES"]:
-            if c in df.columns:
-                df[c] = df[c].astype(str).str.strip()
-        return df
-    except Exception:
-        return None
-
-@st.cache_data(show_spinner=False)
-def _get_top50_and_brand_lists(brand_df: pd.DataFrame) -> Tuple[List[str], Dict[str, List[str]]]:
-    if brand_df is None or brand_df.empty:
-        return [], {}
-    mf_series = brand_df["MANUFACTURER"].dropna().astype(str)
-    top_50 = mf_series.value_counts().head(50).index.tolist()
-    by_mfr: Dict[str, List[str]] = (
-        brand_df.dropna(subset=["MANUFACTURER","BRAND"]).groupby("MANUFACTURER")["BRAND"]
-        .apply(lambda s: sorted(s.astype(str).unique())).to_dict()
-    )
-    return top_50, by_mfr
-
-@st.cache_data(show_spinner=False)
-def _read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    from io import BytesIO, StringIO
-    name = (file_name or "").lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(StringIO(file_bytes.decode("utf-8", errors="ignore")))
-    else:
-        return pd.read_excel(BytesIO(file_bytes))
 
 # =========================
 # Sidebar controls (info box removed)
