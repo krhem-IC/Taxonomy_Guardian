@@ -436,8 +436,8 @@ def brand_accuracy_cleanup(
         
         # Secondary check: use categories if description is unclear or vague
         if not belongs_to_selected and (len(desc_lower.split()) < 4 or any(vague in desc_lower for vague in ['assorted', 'variety', 'misc'])):
-            for product_type in expanded_allowed_types:
-                if len(product_type) > 2 and product_type.lower() in category_text:
+            for product_type in product_types_to_match:
+                if len(product_type) > 2 and product_type in category_text:
                     belongs_to_selected = True
                     match_confidence = "Medium"
                     matching_terms.append(product_type)
