@@ -406,51 +406,33 @@ def brand_accuracy_cleanup(
         if idx < 5:
             log_event("INFO", f"Processing row {idx + 1}", 
                       description=description[:100],
-                      expanded_types_sample=list(expanded_allowed_types)[:5])
+                      product_types_sample=product_types_to_match[:5])
         
         # Primary check: description against allowed product types
-        for product_type in expanded_allowed_types:
-            product_type_clean = product_type.lower().strip()
-            if len(product_type_clean) > 2 and product_type_clean in desc_lower:
+        for product_type in product_types_to_match:
+            if len(product_type) > 2 and product_type in desc_lower:
                 belongs_to_selected = True
                 match_confidence = "High"
-                matching_terms.append(product_type_clean)
+                matching_terms.append(product_type)
                 
                 # Log successful matches for first few rows
                 if idx < 5:
                     log_event("INFO", f"Row {idx + 1} MATCHED", 
-                              matched_term=product_type_clean,
+                              matched_term=product_type,
                               description=description[:50])
         
-        # Universal conflict detection - check if product clearly belongs to different category
-        if belongs_to_selected:
-            # Define conflicting product categories
-            conflicts = {
-                'chips': ['wine', 'alcohol', 'beverage', 'ml', '750', 'vintage', 'cabernet', 'merlot', 'sauvignon'],
-                'wine': ['chips', 'snacks', 'crackers', 'crisps', 'oz', 'bag'],
-                'fitness': ['food', 'snacks', 'ml', 'wine', 'beverage'],
-                'oil': ['chips', 'wine', 'fitness', 'electronic', 'clothing'],
-                'pasta': ['wine', 'chips', 'fitness', 'electronic'],
-                'supplement': ['wine', 'chips', 'fitness equipment', 'clothing'],
-                'tile': ['food', 'beverage', 'wine', 'chips', 'supplement']
-            }
-            
-            # Check if current allowed types conflict with description
-            for allowed_type in allowed_types:
-                allowed_clean = allowed_type.lower().strip()
-                if allowed_clean in conflicts:
-                    conflict_indicators = conflicts[allowed_clean]
-                    if any(indicator in desc_lower for indicator in conflict_indicators):
-                        belongs_to_selected = False
-                        match_confidence = "High"  # High confidence it doesn't belong
-                        
-                        # Log conflicts for first few rows
-                        if idx < 5:
-                            found_conflicts = [ind for ind in conflict_indicators if ind in desc_lower]
-                            log_event("INFO", f"Row {idx + 1} CONFLICT DETECTED", 
-                                      conflicts_found=found_conflicts,
-                                      description=description[:50])
-                        break
+        # Check for wine conflicts (if we're checking chips brand but find wine indicators)
+        wine_indicators = ['ml', '750', 'cabernet', 'merlot', 'sauvignon', 'wine', 'vintage']
+        if belongs_to_selected and any('chip' in pt for pt in product_types_to_match):
+            if any(indicator in desc_lower for indicator in wine_indicators):
+                belongs_to_selected = False
+                match_confidence = "High"  # High confidence it's NOT chips
+                
+                if idx < 5:
+                    found_wine_terms = [ind for ind in wine_indicators if ind in desc_lower]
+                    log_event("INFO", f"Row {idx + 1} WINE CONFLICT", 
+                              wine_terms_found=found_wine_terms,
+                              description=description[:50])
         
         # Secondary check: use categories if description is unclear or vague
         if not belongs_to_selected and (len(desc_lower.split()) < 4 or any(vague in desc_lower for vague in ['assorted', 'variety', 'misc'])):
