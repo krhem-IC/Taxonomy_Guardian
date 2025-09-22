@@ -1,7 +1,7 @@
 # streamlit_app.py
-# Taxonomy Guardian — Brand Accuracy with master mapping, cleaned phrases, heuristics,
+# Taxonomy Guardian - Clean working version with enhancements
+# Brand Accuracy with master mapping, cleaned phrases, heuristics,
 # UPC safety-net (OpenFoodFacts + optional UPCItemDB), and "(UPC Lookup)" strength label.
-# The sidebar "Selected: ..." info box has been removed per request.
 
 import io
 import re
@@ -15,828 +15,821 @@ import numpy as np
 import pandas as pd
 
 # =========================
-# Streamlit import with graceful fallback (to run outside Streamlit)
+# Streamlit import with graceful fallback
 # =========================
 try:
-    import streamlit as st  # type: ignore
-except Exception:
-    class _Ctx:
-        def __enter__(self): return self
-        def __exit__(self, a,b,c): return False
-    class _SB:
-        def header(self,*a,**k): pass
-        def markdown(self,*a,**k): pass
-        def file_uploader(self,*a,**k): return None
-        def selectbox(self,*a,**k): return None
-        def checkbox(self,*a,**k): return False
-        def number_input(self,*a,**k): return 200
-        def slider(self,*a,**k): return 0.15
-        def button(self,*a,**k): return False
-        def info(self,*a,**k): pass
-        def warning(self,*a,**k): pass
-        def error(self,*a,**k): pass
-    class _St:
+    import streamlit as st
+except ImportError:
+    # Mock streamlit for testing
+    class MockSt:
         def __init__(self):
-            self.sidebar = _SB()
+            self.sidebar = self
             self.session_state = {}
             self.secrets = {}
-        def set_page_config(self, *a, **k): pass
-        def image(self,*a,**k): pass
-        def title(self,*a,**k): pass
-        def caption(self,*a,**k): pass
-        def header(self,*a,**k): pass
-        def subheader(self,*a,**k): pass
-        def dataframe(self,*a,**k): pass
-        def json(self,*a,**k): pass
-        def info(self,*a,**k): pass
-        def warning(self,*a,**k): pass
-        def error(self,*a,**k): pass
-        def download_button(self,*a,**k): pass
-        def expander(self,*a,**k): return _Ctx()
-        def cache_data(self, *c, **ck):
-            def deco(fn): return fn
-            return deco
-        def spinner(self, *a, **k): return _Ctx()
-        def columns(self, *a, **k): return _Ctx(), _Ctx()
-    st = _St()  # type: ignore
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+    st = MockSt()
 
 # =========================
-# App config / header
+# App config
 # =========================
 st.set_page_config(page_title="Taxonomy Guardian", page_icon="🛡️", layout="wide")
 
 try:
     c1, c2 = st.columns([0.18, 0.82])
     with c1:
-        st.image("Taxonomy_Guardian.png", use_container_width=True)
+        try:
+            st.image("Taxonomy_Guardian.png", use_container_width=True)
+        except:
+            st.markdown("🛡️")
     with c2:
         st.title("Taxonomy Guardian")
         st.caption("Ensuring the Fetch Taxonomy remains our source of truth")
 except Exception:
     st.title("Taxonomy Guardian")
+    st.caption("Ensuring the Fetch Taxonomy remains our source of truth")
 
 # =========================
-# Logs
+# Logging System
 # =========================
 if "logs" not in st.session_state:
     st.session_state["logs"] = []
 
-def _now() -> str:
+def get_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 def log_event(level: str, msg: str, **data):
-    st.session_state["logs"].append({"ts": _now(), "level": level, "msg": msg, **data})
+    st.session_state["logs"].append({
+        "timestamp": get_timestamp(),
+        "level": level.upper(),
+        "message": msg,
+        **data
+    })
 
 def clear_logs():
     st.session_state["logs"] = []
 
 # =========================
-# Columns / constants
+# Constants
 # =========================
 REQUIRED_COLUMNS = [
-    "FIDO","BARCODE","CATEGORY_HIERARCHY","CATEGORY_1","CATEGORY_2","CATEGORY_3","CATEGORY_4",
-    "DESCRIPTION","MANUFACTURER","BRAND","FIDO_TYPE",
+    "FIDO", "BARCODE", "CATEGORY_HIERARCHY", "CATEGORY_1", "CATEGORY_2", 
+    "CATEGORY_3", "CATEGORY_4", "DESCRIPTION", "MANUFACTURER", "BRAND", "FIDO_TYPE"
 ]
 
 OUTPUT_COLUMNS = [
-    "Correct Brand?","Correct Categories?","Vague Description?","Suggested Brand",
-    "Suggested Category 1","Suggested Category 2","Suggested Category 3","Suggested New Description",
-    "Match Strength",
+    "Correct Brand?", "Correct Categories?", "Vague Description?", "Suggested Brand",
+    "Suggested Category 1", "Suggested Category 2", "Suggested Category 3", 
+    "Suggested New Description", "Match Strength"
 ]
 
-GENERIC_BRAND_TERMS = {"generic","unknown","n/a","na","misc","private label"}
+GENERIC_BRAND_TERMS = {"generic", "unknown", "n/a", "na", "misc", "private label"}
 
-_UNITS = {
-    "ml","oz","fl","floz","ct","pack","pk","pk.","3pk","6pk","12pk","case","g","kg","lb","lbs"
-}
-_FORM_WORDS = {
-    "frozen","roasted","garlic","powder","capsules","tablet","tablets","softgels","gummy","gummies",
-    "ravioli","sauce","mix","assorted","variety","single","multi","bottle","bottles","can","cans",
-    "pods","k-cup","kcup","kcups","keurig","ground","whole","bean","beans"
-}
-_DECOR_NOISE = {
-    "halloween","witch","party","led","lights","mini","battery","powered","outdoor","yard","garden",
-    "tree","black","red","purple"
-}
-
-GENERIC_SINGLE_BRAND_TOKENS = {"garden","fitness","beauty","baby","wine","sports","snacks"}
-
-_NEW_STOPWORDS = set([
-    "pack","size","flavor","assorted","variety","brand","product","item","mix","mixed",
-    "cabernet","sauvignon","merlot","pinot","noir","chardonnay","red","white","rosé","rose",
-    "sports","exercise","treadmill","bike","pro","max","ultra",
-    "chips","crisps","nuts","trail","snack","snacks",
-])
+VAGUE_TERMS = [
+    "assorted", "variety pack", "misc", "pack of", "item", "product", 
+    "brand", "flavor", "size", "mixed", "n/a"
+]
 
 # =========================
-# Basic utils
+# Utility Functions
 # =========================
-def normalize_text(x: str) -> str:
-    return str(x).strip().lower()
+def safe_str(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
 
-def normalized_header_map(cols: List[str]) -> Dict[str, str]:
-    incoming_norm = {c: c.strip().upper() for c in cols}
-    required_set = set(REQUIRED_COLUMNS)
-    mapping: Dict[str, str] = {}
-    used_targets = set()
-    for raw, norm in incoming_norm.items():
-        if norm in required_set and norm not in used_targets:
-            mapping[raw] = norm
-            used_targets.add(norm)
-    return mapping
-
-def coerce_required_columns(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = df_in.copy()
-    mapping = normalized_header_map(df.columns.tolist())
-    if mapping:
-        df = df.rename(columns=mapping)
+def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    column_mapping = {}
+    normalized_incoming = {col: col.strip().upper() for col in df.columns}
+    
+    for incoming_col, normalized_col in normalized_incoming.items():
+        if normalized_col in REQUIRED_COLUMNS:
+            column_mapping[incoming_col] = normalized_col
+    
+    if column_mapping:
+        df = df.rename(columns=column_mapping)
+    
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
+    
     return df
 
 def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
     for col in OUTPUT_COLUMNS:
         if col not in df.columns:
-            df[col] = ""
-    for col in ["Correct Brand?","Correct Categories?","Vague Description?"]:
-        if col in df.columns:
-            df[col] = df[col].replace({"": "N"})
+            if col in ["Correct Brand?", "Correct Categories?", "Vague Description?"]:
+                df[col] = "N"
+            else:
+                df[col] = ""
     return df
 
 # =========================
-# Tokenization / fuzzy helpers
-# =========================
-def _tg_tokenize(text: str) -> List[str]:
-    s = str(text or "").lower()
-    return [t for t in re.split(r"[^a-z0-9]+", s) if t]
-
-def _tg_lev1(a: str, b: str) -> int:
-    if a == b: return 0
-    if abs(len(a)-len(b)) > 1: return 2
-    m, n = len(a), len(b)
-    if m > n: a, b, m, n = b, a, n, m
-    prev = list(range(n+1))
-    for i in range(1, m+1):
-        cur = [i] + [0]*n
-        ai = a[i-1]
-        for j in range(1, n+1):
-            cost = 0 if ai == b[j-1] else 1
-            cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
-        prev = cur
-        if min(prev) > 1: return 2
-    return prev[-1]
-
-def _tg_vowel_eq(a: str, b: str) -> bool:
-    strip = lambda x: re.sub(r"[aeiou]", "", x)
-    return strip(a) == strip(b) and len(a)>3 and len(b)>3
-
-def _tg_whole_phrase(text: str, phrase: str) -> bool:
-    if not phrase: return False
-    patt = r"(?<![a-z0-9])" + re.escape(phrase.lower()) + r"(?![a-z0-9])"
-    return re.search(patt, str(text).lower()) is not None
-
-def _normalize_for_phrase_scan(text: str) -> str:
-    return re.sub(r"[\-/]+", " ", str(text))
-
-def _title_case_brand(phrase: str) -> str:
-    return " ".join(w.capitalize() for w in str(phrase).split())
-
-def _tg_strip_corp_suffix(phrase: str) -> str:
-    suffixes = {"co","co.","inc","inc.","llc","l.l.c.","ltd","ltd.","corp","corp.","company"}
-    parts = str(phrase).strip().split()
-    while parts and parts[-1].lower() in suffixes:
-        parts.pop()
-    return " ".join(parts)
-
-# =========================
-# Phrase cleaner (caps to 2–3 tokens, strips units/forms/decor noise)
-# =========================
-def _tg_clean_phrase(core: str) -> str:
-    tokens = [t for t in re.findall(r"[A-Za-z][A-Za-z0-9]+", core)]
-    cleaned = []
-    for t in tokens:
-        tl = t.lower()
-        if tl in _UNITS or tl in _FORM_WORDS or tl in _DECOR_NOISE:
-            continue
-        cleaned.append(t)
-        if len(cleaned) >= 3:
-            break
-    if not cleaned:
-        return ""
-    out = " ".join(cleaned)
-    out = _tg_strip_corp_suffix(out)
-    return _title_case_brand(out)
-
-# =========================
-# Family (heuristic) detector — low confidence fallback
-# =========================
-def _tg_detect_family(text: str) -> Optional[str]:
-    t = str(text or "").lower()
-    if any(w in t for w in ["wine","merlot","cabernet","pinot","chardonnay","sauvignon","syrah","rioja","tempranillo"]):
-        return "Wine"
-    if any(w in t for w in ["decor","decoration","halloween","witch","ornament","garland","lights"]):
-        return "Decor"
-    if any(w in t for w in ["capsule","capsules","powder","gummy","gummies","supplement","supplements"]):
-        return "Supplements"
-    if any(w in t for w in ["tile","marble","terrazzo","ceramic","porcelain","granite","sample"]):
-        return "Tile"
-    if any(w in t for w in ["fitness","treadmill","exercise","bike","belt"]):
-        return "Fitness"
-    if any(w in t for w in ["coffee","keurig","k-cup","kcup","kcups","ground","espresso"]):
-        return "Coffee"
-    return None
-
-# =========================
-# Master brand index + NEW extraction
-# =========================
-def _tg_master_brands(brand_df: Optional[pd.DataFrame]) -> set:
-    if brand_df is None or "BRAND" not in brand_df.columns:
-        return set()
-    return set(brand_df["BRAND"].astype(str).str.strip().str.lower().tolist())
-
-def _tg_brand_token_index(brand_df: Optional[pd.DataFrame]):
-    idx = []
-    if brand_df is None or "BRAND" not in brand_df.columns:
-        return idx
-    for b in brand_df["BRAND"].astype(str).str.strip().str.lower().unique():
-        toks = set(_tg_tokenize(b))
-        if toks:
-            idx.append((b, toks))
-    return idx
-
-def _tg_map_to_master(raw_brand: Optional[str], master: set) -> Optional[str]:
-    if not raw_brand:
-        return None
-    rb = re.sub(r"[^a-z0-9 ]+", " ", str(raw_brand).lower()).strip()
-    if not rb:
-        return None
-    if rb in master:
-        return rb
-    rb2 = re.sub(r"\s+", " ", rb)
-    if rb2 in master:
-        return rb2
-    cands = [m for m in master if m[:1] == rb2[:1]]
-    best, bestd = None, 2
-    for m in cands:
-        d = _tg_lev1(m, rb2)
-        if d < bestd:
-            best, bestd = m, d
-            if d == 0:
-                break
-    if best and bestd <= 1:
-        return best
-    return None
-
-def _tg_extract_new_brand(desc: str) -> Optional[str]:
-    if not desc:
-        return None
-    s = _normalize_for_phrase_scan(desc)
-
-    # X by Y
-    m = re.search(r"\b([A-Za-z][\w]+(?:\s+[A-Za-z][\w]+){0,2})\s+by\s+([A-Za-z][\w]+)\b", s, flags=re.IGNORECASE)
-    if m:
-        cand = f"{m.group(1)} by {m.group(2)}".strip()
-        return _title_case_brand(cand)
-
-    # ROOT ... fitness
-    m = re.search(r"\b([A-Za-z][A-Za-z0-9]{2,})\b[^\n\r]{0,80}?\bfitness\b", s, flags=re.IGNORECASE)
-    if m:
-        root = m.group(1)
-        return _title_case_brand(f"{root} Fitness")
-
-    # 2–3 tokens (conservative)
-    tokens = re.findall(r"\b([A-Za-z][A-Za-z0-9]+)\b", s)
-    best = None
-    best_len = 0
-    for n in (3, 2):
-        for i in range(len(tokens) - n + 1):
-            window = tokens[i:i+n]
-            filtered = [t for t in window if t.lower() not in _NEW_STOPWORDS]
-            if not filtered:
-                continue
-            phrase = " ".join(window)
-            if len(phrase) > best_len:
-                best = phrase
-                best_len = len(phrase)
-        if best:
-            break
-    return _title_case_brand(best) if best else None
-
-# =========================
-# UPC lookups (OFF first; then UPCItemDB if available in secrets)
-# =========================
-def _get_secret(key: str, default=None):
-    try:
-        return st.secrets[key]
-    except Exception:
-        return default
-
-class _TGUPC:
-    def __init__(self):
-        self.session_cache = {}
-        self.disk_path = ".upc_cache.json"
-        try:
-            with open(self.disk_path, "r", encoding="utf-8") as f:
-                self.disk_cache = json.load(f)
-        except Exception:
-            self.disk_cache = {}
-
-    def _save(self):
-        try:
-            with open(self.disk_path, "w", encoding="utf-8") as f:
-                json.dump(self.disk_cache, f)
-        except Exception:
-            pass
-
-    def lookup(self, barcodes: list, off_cap=300, off_interval=0.15, upcdb_cap=100, upcdb_interval=0.5) -> dict:
-        out = {}
-        for b in barcodes:
-            if not b:
-                continue
-            if b in self.session_cache:
-                out[b] = self.session_cache[b]
-            elif b in self.disk_cache:
-                out[b] = self.disk_cache[b]
-        remaining = [b for b in barcodes if b and b not in out]
-        if remaining:
-            remaining = self._off(remaining, out, off_cap, off_interval)
-            remaining = self._upcdb(remaining, out, upcdb_cap, upcdb_interval)
-        for k, v in out.items():
-            self.session_cache[k] = v
-            self.disk_cache[k] = v
-        self._save()
-        return out
-
-    def _off(self, barcodes, out, cap, interval):
-        import requests
-        n = 0
-        for b in barcodes:
-            if n >= cap:
-                break
-            try:
-                r = requests.get(f"https://world.openfoodfacts.org/api/v2/product/{b}.json", timeout=6)
-                if r.status_code == 200:
-                    js = r.json()
-                    brand = None
-                    try:
-                        brand = (js.get("product", {}).get("brands_tags", []) or [None])[0]
-                    except Exception:
-                        brand = None
-                    if brand:
-                        out[b] = {"source":"OFF","brand": brand}
-                elif r.status_code in (429, 500, 502, 503):
-                    time.sleep(0.75)
-            except Exception:
-                pass
-            n += 1
-            time.sleep(interval)
-        return [b for b in barcodes if b not in out]
-
-    def _upcdb(self, barcodes, out, cap, interval):
-        import requests
-        api_key = _get_secret("upcitemdb_api_key")
-        if not api_key:
-            return barcodes
-        endpoint = _get_secret("upcitemdb_endpoint", "https://api.upcitemdb.com/prod/trial/lookup")
-        headers = {"user_key": api_key, "key_type": "free" if "trial" in endpoint else "paid"}
-        n = 0
-        for b in barcodes:
-            if n >= cap:
-                break
-            try:
-                r = requests.get(endpoint, params={"upc": b}, headers=headers, timeout=6)
-                if r.status_code == 200:
-                    js = r.json()
-                    brand = None
-                    try:
-                        if js.get("code") == "OK" and js.get("total", 0) > 0:
-                            items = js.get("items", [])
-                            if items:
-                                brand = items[0].get("brand")
-                    except Exception:
-                        brand = None
-                    if brand:
-                        out[b] = {"source":"UPCItemDB","brand": brand}
-                elif r.status_code in (429, 500, 502, 503):
-                    time.sleep(0.75)
-            except Exception:
-                pass
-            n += 1
-            time.sleep(interval)
-        return [b for b in barcodes if b not in out]
-
-# =========================
-# Load Brand–Manufacturer reference  ✅ (restored)
+# File I/O Functions
 # =========================
 @st.cache_data(show_spinner=False)
-def _read_brand_mfr_xlsx(path_or_buffer) -> Optional[pd.DataFrame]:
+def read_excel_file(file_path_or_buffer) -> Optional[pd.DataFrame]:
     try:
-        df = pd.read_excel(path_or_buffer)
-        df = df.rename(columns={c: c.strip().upper() for c in df.columns})
-        for c in ["BRAND","MANUFACTURER","WEBSITE","ALLOWED_PRODUCT_TYPES"]:
-            if c in df.columns:
-                df[c] = df[c].astype(str).str.strip()
+        df = pd.read_excel(file_path_or_buffer)
+        df.columns = [col.strip().upper() for col in df.columns]
+        
+        string_columns = ["BRAND", "MANUFACTURER", "WEBSITE", "ALLOWED_PRODUCT_TYPES"]
+        for col in string_columns:
+            if col in df.columns:
+                df[col] = df[col].astype(str).str.strip()
+        
         return df
-    except Exception:
+    except Exception as e:
+        log_event("ERROR", f"Failed to read Excel file: {str(e)}")
         return None
 
-def load_brand_mfr_reference(sidebar=True) -> Optional[pd.DataFrame]:
-    # First try the copy that’s bundled in the repo
-    brand_df = _read_brand_mfr_xlsx("All_Brands_Manufacturers.xlsx")
-    if brand_df is None and sidebar:
-        st.sidebar.markdown("##### Load Brand–Manufacturer Reference")
+@st.cache_data(show_spinner=False)
+def read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
+    from io import BytesIO, StringIO
+    
+    try:
+        file_name = file_name.lower()
+        
+        if file_name.endswith('.csv'):
+            content = file_bytes.decode('utf-8', errors='ignore')
+            df = pd.read_csv(StringIO(content))
+        else:
+            df = pd.read_excel(BytesIO(file_bytes))
+        
+        log_event("INFO", f"Successfully loaded file: {file_name}", rows=len(df), columns=len(df.columns))
+        return df
+        
+    except Exception as e:
+        log_event("ERROR", f"Failed to read user file: {str(e)}")
+        raise
+
+# =========================
+# Brand Reference Functions
+# =========================
+def load_brand_reference(show_upload: bool = True) -> Optional[pd.DataFrame]:
+    brand_df = read_excel_file("All_Brands_Manufacturers.xlsx")
+    
+    if brand_df is None and show_upload:
+        st.sidebar.markdown("##### Brand-Manufacturer Reference")
         uploaded_ref = st.sidebar.file_uploader(
             "Upload All_Brands_Manufacturers.xlsx",
-            type=["xlsx","xls"],
-            key="brand_mfr_uploader"
+            type=["xlsx", "xls"],
+            key="brand_reference_uploader"
         )
+        
         if uploaded_ref is not None:
-            brand_df = _read_brand_mfr_xlsx(uploaded_ref)
+            brand_df = read_excel_file(uploaded_ref)
             if brand_df is None:
                 st.sidebar.error("Failed to read reference file.")
+    
+    if brand_df is not None:
+        log_event("INFO", "Brand reference loaded", brands=len(brand_df))
+    
     return brand_df
 
-# =========================
-# Other cached I/O
-# =========================
 @st.cache_data(show_spinner=False)
-def _get_top50_and_brand_lists(brand_df: pd.DataFrame) -> Tuple[List[str], Dict[str, List[str]]]:
+def get_manufacturer_brand_lists(brand_df: pd.DataFrame) -> Tuple[List[str], Dict[str, List[str]]]:
     if brand_df is None or brand_df.empty:
         return [], {}
-    mf_series = brand_df["MANUFACTURER"].dropna().astype(str)
-    top_50 = mf_series.value_counts().head(50).index.tolist()
-    by_mfr: Dict[str, List[str]] = (
-        brand_df.dropna(subset=["MANUFACTURER","BRAND"]).groupby("MANUFACTURER")["BRAND"]
-        .apply(lambda s: sorted(s.astype(str).unique())).to_dict()
+    
+    manufacturer_counts = brand_df["MANUFACTURER"].value_counts()
+    top_50_manufacturers = manufacturer_counts.head(50).index.tolist()
+    
+    brands_by_manufacturer = (
+        brand_df.dropna(subset=["MANUFACTURER", "BRAND"])
+        .groupby("MANUFACTURER")["BRAND"]
+        .apply(lambda x: sorted(x.unique()))
+        .to_dict()
     )
-    return top_50, by_mfr
+    
+    return top_50_manufacturers, brands_by_manufacturer
 
-@st.cache_data(show_spinner=False)
-def _read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    from io import BytesIO, StringIO
-    name = (file_name or "").lower()
-    if name.endswith(".csv"):
-        return pd.read_csv(StringIO(file_bytes.decode("utf-8", errors="ignore")))
-    else:
-        return pd.read_excel(BytesIO(file_bytes))
+def get_master_brand_set(brand_df: Optional[pd.DataFrame]) -> set:
+    if brand_df is None or "BRAND" not in brand_df.columns:
+        return set()
+    return set(brand_df["BRAND"].astype(str).str.strip().str.lower())
+
+def get_allowed_product_types(brand_df: pd.DataFrame, brand_name: str) -> List[str]:
+    if brand_df is None or "ALLOWED_PRODUCT_TYPES" not in brand_df.columns:
+        return []
+    
+    brand_rows = brand_df[brand_df["BRAND"].str.lower() == brand_name.lower()]
+    if brand_rows.empty:
+        return []
+    
+    allowed_types_raw = safe_str(brand_rows.iloc[0].get("ALLOWED_PRODUCT_TYPES", ""))
+    if not allowed_types_raw:
+        return []
+    
+    return [t.strip().lower() for t in allowed_types_raw.split(",") if t.strip()]
 
 # =========================
-# Brand Accuracy
+# Enhanced Processing Functions
+# =========================
+def detect_product_family(description: str) -> Optional[str]:
+    desc_lower = description.lower()
+    
+    if any(term in desc_lower for term in ["wine", "merlot", "cabernet", "pinot", "chardonnay"]):
+        return "Wine"
+    if any(term in desc_lower for term in ["coffee", "espresso", "k-cup", "keurig"]):
+        return "Coffee"
+    if any(term in desc_lower for term in ["vitamin", "supplement", "capsule", "tablet"]):
+        return "Supplements"
+    if any(term in desc_lower for term in ["decoration", "ornament", "halloween"]):
+        return "Decor"
+    if any(term in desc_lower for term in ["fitness", "treadmill", "exercise"]):
+        return "Fitness"
+    
+    return None
+
+def suggest_category_improvements(description: str, current_categories: Tuple) -> Tuple[str, str, str, str]:
+    """Suggest improved categories based on description"""
+    desc_lower = description.lower()
+    
+    # Wine categories
+    if any(term in desc_lower for term in ["wine", "merlot", "cabernet", "pinot"]):
+        return ("Food", "Beverages", "Alcoholic", "Wine")
+    
+    # Coffee categories
+    if any(term in desc_lower for term in ["coffee", "espresso", "k-cup"]):
+        return ("Food", "Beverages", "Non-Alcoholic", "Coffee")
+    
+    # Supplement categories
+    if any(term in desc_lower for term in ["vitamin", "supplement", "capsule"]):
+        return ("Health & Beauty", "Supplements", "Vitamins", "Multivitamins")
+    
+    # Snack categories
+    if any(term in desc_lower for term in ["chips", "nuts", "crackers"]):
+        return ("Food", "Snacks", "Chips & Nuts", "Mixed")
+    
+    # Default: try to fill missing categories logically
+    cat1, cat2, cat3, cat4 = current_categories
+    
+    if not cat1:
+        cat1 = "Food"  # Most common
+    if not cat2:
+        cat2 = "Other"
+    if not cat3:
+        cat3 = "Miscellaneous"
+    if not cat4:
+        cat4 = "General"
+    
+    return (cat1, cat2, cat3, cat4)
+
+def improve_description(description: str, brand: str = "") -> str:
+    """Suggest improved description"""
+    desc = safe_str(description).strip()
+    
+    if not desc:
+        return "Product description needed"
+    
+    improved = desc
+    
+    # Replace vague terms with more specific ones
+    replacements = {
+        "assorted": "Mixed Variety",
+        "variety pack": "Multi-Pack Selection",
+        "mixed": "Assorted Selection",
+        "misc": "Miscellaneous Items",
+        "pack of": "Multi-Pack",
+        "various": "Multiple Varieties"
+    }
+    
+    for vague_term, improvement in replacements.items():
+        improved = re.sub(r'\b' + re.escape(vague_term) + r'\b', improvement, improved, flags=re.IGNORECASE)
+    
+    # Add brand if missing and description is short
+    if brand and brand.lower() not in improved.lower() and len(improved.split()) < 3:
+        improved = f"{brand} {improved}"
+    
+    # Clean up formatting
+    improved = re.sub(r'\s+', ' ', improved).strip()
+    improved = improved[0].upper() + improved[1:] if improved else improved
+    
+    return improved
+
+# =========================
+# Main Cleanup Functions
 # =========================
 def brand_accuracy_cleanup(
     df: pd.DataFrame,
     brand_df: Optional[pd.DataFrame],
-    selected_mfr: str,
+    selected_manufacturer: str,
     selected_brand: str,
     log_changes_only: bool = True,
-    max_logs: int = 200,
+    max_logs: int = 200
 ) -> pd.DataFrame:
+    
+    if not selected_manufacturer or not selected_brand:
+        log_event("ERROR", "No manufacturer or brand selected")
+        return df
+    
+    log_event("INFO", "Starting brand accuracy cleanup", 
+              manufacturer=selected_manufacturer, 
+              brand=selected_brand, 
+              rows=len(df))
+    
     df = df.copy()
     df = ensure_output_columns(df)
-    if "Match Strength" not in df.columns:
-        df["Match Strength"] = ""
-
-    sb = str(selected_brand or "").strip()
-    sb_lower = sb.lower()
-
-    # Allowed product types from master (for selected brand only)
-    allowed_types: List[str] = []
-    if brand_df is not None and {"ALLOWED_PRODUCT_TYPES","BRAND"}.issubset(brand_df.columns):
-        hits = brand_df[brand_df["BRAND"].astype(str).str.lower() == sb_lower]
-        if not hits.empty:
-            raw = str(hits.iloc[0].get("ALLOWED_PRODUCT_TYPES", "")).strip()
-            if raw:
-                allowed_types = sorted({t.strip().lower() for t in raw.split(",") if t.strip()})
-
-    brand_norm_lower = df["BRAND"].astype(str).str.strip().str.lower()
-    nullish = {"", "none", "null", "nan", "n/a", "na"}
-    mask_generic = brand_norm_lower.isin(nullish) | brand_norm_lower.isin(GENERIC_BRAND_TERMS) | df["BRAND"].isna()
-
-    desc_col = df["DESCRIPTION"].astype(str)
-
-    def belongs_to_selected(text: str) -> bool:
-        if allowed_types:
-            for ph in allowed_types:
-                toks = _tg_tokenize(text)
-                first = toks[0] if toks else ""
-                if _tg_whole_phrase(text, ph) or _tg_vowel_eq(ph, first):
-                    return True
-            return False
-        else:
-            return _tg_whole_phrase(text, sb_lower) or (sb_lower in text.lower())
-
-    df["_belongs"] = desc_col.apply(belongs_to_selected)
-    df.loc[:, "Correct Brand?"] = np.where(mask_generic | ~df["_belongs"], "N", "Y")
-
-    master_brands = _tg_master_brands(brand_df)
-
-    suggestions: List[str] = []
-    strengths: List[str] = []
-    upc_needed: List[Tuple[int, str]] = []
-
+    
+    # Create progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    master_brands = get_master_brand_set(brand_df)
+    allowed_types = get_allowed_product_types(brand_df, selected_brand)
+    selected_brand_lower = selected_brand.lower()
+    
+    df["Correct Brand?"] = "N"
+    df["Suggested Brand"] = ""
+    df["Match Strength"] = ""
+    
+    changes_logged = 0
+    total_rows = len(df)
+    
     for idx, row in df.iterrows():
-        desc = str(row.get("DESCRIPTION", ""))
-        desc_norm = _normalize_for_phrase_scan(desc)
-        desc_lower = desc_norm.lower()
-
-        if row["Correct Brand?"] == "Y":
-            suggestions.append("")
-            strengths.append("High")
-            continue
-
-        # ---- 1) Master mapping from description (exact/near) ----
-        best_brand, best_len = None, 0
-        for b in master_brands:
-            if _tg_whole_phrase(desc_lower, b):
-                if b.strip().lower() == sb_lower:
-                    continue
-                if len(b) > best_len:
-                    best_brand, best_len = b, len(b)
-        if best_brand:
-            suggestions.append(best_brand.title())
-            strengths.append("High")
-            continue
-
-        # ---- 2) SelectedBrand + cleaned phrase (up to 3 tokens) ----
-        if _tg_whole_phrase(desc_lower, sb_lower):
-            m2 = re.search(
-                rf"\b{re.escape(sb)}\s+([A-Za-z][A-Za-z0-9]+(?:\s+[A-Za-z][A-Za-z0-9]+){{0,3}})",
-                desc_norm,
-                flags=re.IGNORECASE,
-            )
-            if m2:
-                raw_tail = m2.group(1)
-                cleaned = _tg_clean_phrase(f"{sb} {raw_tail}")
-                if cleaned and cleaned.lower() != sb_lower:
-                    mapped = _tg_map_to_master(cleaned, master_brands)
-                    if mapped and mapped.strip().lower() != sb_lower:
-                        suggestions.append(mapped.title())
-                        strengths.append("High")
-                        continue
-                    else:
-                        suggestions.append(f"{cleaned} (NEW)")
-                        strengths.append("Medium")
-                        continue
-
-        # ---- 3) Heuristic fallback (low confidence) ----
-        fam = _tg_detect_family(desc)
-        if fam:
-            suggestions.append(f"{selected_brand} {fam}")
-            strengths.append("Low")
-        else:
-            suggestions.append("")
-            strengths.append("")
-
-        # ---- 4) UPC lookup (safety net) ----
-        bc = str(row.get("BARCODE", "")).strip()
-        need_upc = (bc and bc.isdigit() and len(bc) >= 8)
-        already_have = bool(suggestions[-1]) and suggestions[-1] not in ("", "Unclear")
-        if need_upc and not already_have:
-            upc_needed.append((idx, bc))
-
-    # UPC pass (batch)
-    if upc_needed:
-        prov = _TGUPC()
-        uniq = sorted(set(bc for _, bc in upc_needed))
-        results = prov.lookup(uniq, off_cap=300, off_interval=0.15, upcdb_cap=100, upcdb_interval=0.5)
-        by_bc: Dict[str, List[int]] = {}
-        for i, bc in upc_needed:
-            by_bc.setdefault(bc, []).append(i)
-
-        for bc, info in results.items():
-            raw = (info or {}).get("brand")
-            mapped = _tg_map_to_master(raw, master_brands)
-            label = (mapped.title() if mapped else (_title_case_brand(str(raw)) if raw else None))
-            for i in by_bc.get(bc, []):
-                if not label:
-                    continue
-                if not suggestions[i] or strengths[i] in ("", "Low"):
-                    suggestions[i] = label if mapped else f"{label} (NEW)"
-                    base_strength = "High" if mapped else "Medium"
-                    strengths[i] = f"{base_strength} (UPC Lookup)"
-
-    # Fill remaining rows (NEW / Unclear)
-    for i in range(len(suggestions)):
-        if suggestions[i]:
-            continue
-        desc = str(df.iloc[i].get("DESCRIPTION", ""))
-        new_phrase = _tg_extract_new_brand(_normalize_for_phrase_scan(desc))
-        if new_phrase:
-            mapped = _tg_map_to_master(new_phrase, master_brands)
-            if mapped and mapped.strip().lower() != sb_lower:
-                suggestions[i] = mapped.title()
-                strengths[i] = "Medium"
-                continue
-            elif new_phrase.lower() != sb_lower:
-                suggestions[i] = f"{new_phrase} (NEW)"
-                strengths[i] = "Medium"
-                continue
-        suggestions[i] = "Unclear"
-        strengths[i] = "Low"
-
-    # Final filters: block generic single tokens and base brand on N rows
-    for i, s in enumerate(suggestions):
-        if not s or s == "Unclear":
-            continue
-        base = s.replace(" (NEW)", "").strip()
-        if base.lower() in GENERIC_SINGLE_BRAND_TOKENS:
-            suggestions[i] = "Unclear"
-            strengths[i] = "Low"
-            continue
-        if base.lower() == sb_lower and df.iloc[i]["Correct Brand?"] == "N":
-            suggestions[i] = "Unclear"
-            strengths[i] = "Low"
-            continue
-        if base.lower() not in master_brands and not s.endswith("(NEW)"):
-            suggestions[i] = f"{base} (NEW)"
-
-    df.loc[:, "Suggested Brand"] = suggestions
-    df.loc[:, "Match Strength"] = strengths
-
-    # Ensure Y rows have blank suggestion
-    df.loc[df["Correct Brand?"].eq("Y"), "Suggested Brand"] = ""
-    df.loc[df["Correct Brand?"].eq("Y"), "Match Strength"] = "High"
-
-    # Logs
-    changed = df[df["Correct Brand?"].eq("N")]
-    for _, r in changed.head(max_logs).iterrows() if log_changes_only else changed.iterrows():
-        log_event(
-            "INFO", "Brand check (final)",
-            fido=str(r.get("FIDO")),
-            brand=str(r.get("BRAND")),
-            desc=str(r.get("DESCRIPTION"))[:200],
-            suggested=str(r.get("Suggested Brand")),
-            strength=str(r.get("Match Strength")),
+        # Update progress
+        progress = (idx + 1) / total_rows
+        progress_bar.progress(progress)
+        status_text.text(f"Processing row {idx + 1} of {total_rows}")
+        
+        current_brand = safe_str(row.get("BRAND", "")).lower()
+        description = safe_str(row.get("DESCRIPTION", ""))
+        
+        is_generic = (
+            not current_brand or 
+            current_brand in {"", "none", "null", "nan", "n/a", "na"} or
+            current_brand in GENERIC_BRAND_TERMS
         )
+        
+        belongs_to_selected = False
+        if allowed_types:
+            for product_type in allowed_types:
+                if product_type in description.lower():
+                    belongs_to_selected = True
+                    break
+        else:
+            belongs_to_selected = selected_brand_lower in description.lower()
+        
+        if not is_generic and belongs_to_selected:
+            df.at[idx, "Correct Brand?"] = "Y"
+            df.at[idx, "Match Strength"] = "High"
+            continue
+        
+        # Look for brand suggestions
+        suggestion = ""
+        strength = "Low"
+        
+        # Check for master brand matches in description
+        best_brand = None
+        best_length = 0
+        
+        for brand in master_brands:
+            if len(brand) > 2 and brand in description.lower():
+                pattern = r'\b' + re.escape(brand) + r'\b'
+                if re.search(pattern, description.lower()) and len(brand) > best_length:
+                    best_brand = brand
+                    best_length = len(brand)
+        
+        if best_brand and best_brand != selected_brand_lower:
+            suggestion = best_brand.title()
+            strength = "High"
+        else:
+            # Try family-based suggestion
+            family = detect_product_family(description)
+            if family:
+                suggestion = f"{selected_brand} {family}"
+                strength = "Medium"
+            else:
+                suggestion = "Unclear"
+                strength = "Low"
+        
+        df.at[idx, "Suggested Brand"] = suggestion
+        df.at[idx, "Match Strength"] = strength
+        
+        # Log changes
+        if log_changes_only and changes_logged < max_logs and df.at[idx, "Correct Brand?"] == "N":
+            log_event("INFO", "Brand correction needed",
+                      fido=safe_str(row.get("FIDO")),
+                      current_brand=current_brand,
+                      suggested_brand=suggestion,
+                      strength=strength)
+            changes_logged += 1
+    
+    progress_bar.progress(1.0)
+    status_text.text("Brand cleanup completed!")
+    
+    correct_count = len(df[df["Correct Brand?"] == "Y"])
+    incorrect_count = len(df[df["Correct Brand?"] == "N"])
+    
+    log_event("INFO", "Brand cleanup completed",
+              correct_brands=correct_count,
+              incorrect_brands=incorrect_count,
+              total_rows=len(df))
+    
     return df
 
-# =========================
-# Other cleanups
-# =========================
 def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
+    log_event("INFO", "Starting category hierarchy cleanup", rows=len(df))
+    
     df = df.copy()
     df = ensure_output_columns(df)
-    ok = df[["CATEGORY_1","CATEGORY_2","CATEGORY_3","CATEGORY_4"]].notna().all(axis=1)
-    df.loc[:, "Correct Categories?"] = np.where(ok, df.get("Correct Categories?","Y"), "N")
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    total_rows = len(df)
+    
+    for idx, row in df.iterrows():
+        progress = (idx + 1) / total_rows
+        progress_bar.progress(progress)
+        status_text.text(f"Analyzing categories for row {idx + 1} of {total_rows}")
+        
+        current_cats = (
+            safe_str(row.get("CATEGORY_1", "")),
+            safe_str(row.get("CATEGORY_2", "")),
+            safe_str(row.get("CATEGORY_3", "")),
+            safe_str(row.get("CATEGORY_4", ""))
+        )
+        
+        all_categories_filled = all(cat for cat in current_cats)
+        
+        if all_categories_filled:
+            df.at[idx, "Correct Categories?"] = "Y"
+        else:
+            df.at[idx, "Correct Categories?"] = "N"
+            
+            # Generate suggestions
+            description = safe_str(row.get("DESCRIPTION", ""))
+            suggested_cats = suggest_category_improvements(description, current_cats)
+            
+            df.at[idx, "Suggested Category 1"] = suggested_cats[0]
+            df.at[idx, "Suggested Category 2"] = suggested_cats[1]
+            df.at[idx, "Suggested Category 3"] = suggested_cats[2]
+            df.at[idx, "Match Strength"] = "Medium"
+    
+    progress_bar.progress(1.0)
+    status_text.text("Category cleanup completed!")
+    
+    correct_count = len(df[df["Correct Categories?"] == "Y"])
+    log_event("INFO", "Category cleanup completed", 
+              correct_categories=correct_count,
+              total_rows=len(df))
+    
     return df
 
 def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
+    log_event("INFO", "Starting description cleanup", rows=len(df))
+    
     df = df.copy()
     df = ensure_output_columns(df)
-    desc = df["DESCRIPTION"].astype(str).str.lower().fillna("")
-    generic_hits = desc.str.contains(r"\b(assorted|variety pack|misc|pack of|item|product|brand|flavor|size|mixed|n/a)\b", regex=True)
-    df.loc[:, "Vague Description?"] = np.where(generic_hits, "Y", df.get("Vague Description?","N"))
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    total_rows = len(df)
+    
+    vague_pattern = r'\b(' + '|'.join(VAGUE_TERMS) + r')\b'
+    
+    for idx, row in df.iterrows():
+        progress = (idx + 1) / total_rows
+        progress_bar.progress(progress)
+        status_text.text(f"Analyzing description for row {idx + 1} of {total_rows}")
+        
+        description = safe_str(row.get("DESCRIPTION", ""))
+        brand = safe_str(row.get("BRAND", ""))
+        
+        is_vague = bool(re.search(vague_pattern, description.lower())) or len(description.strip()) < 10
+        
+        df.at[idx, "Vague Description?"] = "Y" if is_vague else "N"
+        
+        if is_vague:
+            improved_desc = improve_description(description, brand)
+            df.at[idx, "Suggested New Description"] = improved_desc
+            df.at[idx, "Match Strength"] = "Medium"
+    
+    progress_bar.progress(1.0)
+    status_text.text("Description cleanup completed!")
+    
+    vague_count = len(df[df["Vague Description?"] == "Y"])
+    log_event("INFO", "Description cleanup completed",
+              vague_descriptions=vague_count,
+              total_rows=len(df))
+    
     return df
 
 # =========================
-# Sidebar controls (info box removed)
+# UI Functions
 # =========================
-def sidebar_controls(brand_df: Optional[pd.DataFrame]):
-    st.sidebar.header("Inputs")
-    uploaded = st.sidebar.file_uploader(
-        "Upload data file (from Snowflake export)",
-        type=["xlsx","xls","csv"],
-        key="data_upl"
+def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
+    st.sidebar.header("📁 File Upload")
+    
+    uploaded_file = st.sidebar.file_uploader(
+        "Upload data file from Snowflake export",
+        type=["xlsx", "xls", "csv"],
+        help="Supported formats: Excel (.xlsx, .xls) and CSV (.csv)"
     )
-
-    if uploaded is not None:
-        file_bytes = uploaded.getvalue()
-        file_key = f"{uploaded.name}:{hash(file_bytes)}"
-        if st.session_state.get("_last_file_key") != file_key:
-            st.session_state["_last_file_key"] = file_key
-            st.session_state["_raw_df"] = _read_user_file(uploaded.name, file_bytes)
-    raw_df = st.session_state.get("_raw_df")
-
-    cleanup_choice = st.sidebar.selectbox(
-        "Type of cleanup",
-        ["Brand Accuracy","Category Hierarchy Cleanup","Vague Description Cleanup"],
-        index=0
+    
+    raw_df = None
+    if uploaded_file is not None:
+        try:
+            file_bytes = uploaded_file.getvalue()
+            file_key = f"{uploaded_file.name}:{hash(file_bytes)}"
+            
+            if st.session_state.get("_last_file_key") != file_key:
+                st.session_state["_last_file_key"] = file_key
+                st.session_state["_raw_df"] = read_user_file(uploaded_file.name, file_bytes)
+                st.sidebar.success(f"✅ File loaded: {uploaded_file.name}")
+            
+            raw_df = st.session_state.get("_raw_df")
+            
+        except Exception as e:
+            st.sidebar.error(f"❌ Error reading file: {str(e)}")
+    
+    st.sidebar.header("🔧 Cleanup Options")
+    
+    cleanup_type = st.sidebar.selectbox(
+        "Select cleanup type:",
+        ["Brand Accuracy", "Category Hierarchy Cleanup", "Vague Description Cleanup"],
+        help="Choose the type of data cleanup to perform"
     )
-
-    selected_mfr = selected_brand = None
-    if cleanup_choice == "Brand Accuracy":
-        st.sidebar.markdown("#### Brand Accuracy Settings")
-        show_top_only = st.sidebar.checkbox("Limit to Top 50 Manufacturers", value=True)
-        manufacturer_options: List[str] = []
-        brand_options: List[str] = []
+    
+    selected_manufacturer = None
+    selected_brand = None
+    
+    if cleanup_type == "Brand Accuracy":
+        st.sidebar.subheader("Brand Settings")
+        
         if brand_df is not None and not brand_df.empty:
-            top_50, by_mfr = _get_top50_and_brand_lists(brand_df)
-            manufacturer_options = top_50 if show_top_only else sorted(list(by_mfr.keys()))
-            selected_mfr = st.sidebar.selectbox("Select Manufacturer", options=manufacturer_options)
-            if selected_mfr:
-                brand_options = by_mfr.get(selected_mfr, [])
-            selected_brand = st.sidebar.selectbox("Select Brand", options=brand_options)
+            show_top_only = st.sidebar.checkbox("Show only top 50 manufacturers", value=True)
+            
+            top_manufacturers, brands_by_manufacturer = get_manufacturer_brand_lists(brand_df)
+            
+            manufacturer_options = top_manufacturers if show_top_only else sorted(brands_by_manufacturer.keys())
+            
+            selected_manufacturer = st.sidebar.selectbox(
+                "Select manufacturer:",
+                options=manufacturer_options,
+                help="Choose the manufacturer to focus cleanup on"
+            )
+            
+            if selected_manufacturer:
+                brand_options = brands_by_manufacturer.get(selected_manufacturer, [])
+                selected_brand = st.sidebar.selectbox(
+                    "Select brand:",
+                    options=brand_options,
+                    help="Choose the specific brand for cleanup"
+                )
         else:
-            st.sidebar.warning("Load the Brand–Manufacturer reference to enable selections.")
-
-    st.sidebar.markdown("#### Runtime Controls")
-    log_changes_only = st.sidebar.checkbox("Log only changed/flagged rows", value=True)
-    max_logs = st.sidebar.number_input("Max rows to log", min_value=50, max_value=2000, value=200, step=50)
-    min_interval = st.sidebar.slider("Min interval between external calls (sec)", 0.0, 1.0, 0.15, 0.05)
-    run = st.sidebar.button("Run Cleanup", use_container_width=True)
-
-    return uploaded, raw_df, cleanup_choice, selected_mfr, selected_brand, log_changes_only, max_logs, min_interval, run
-
-# =========================
-# Results rendering
-# =========================
-def show_results(cleaned: pd.DataFrame):
-    st.subheader("Results")
-    st.dataframe(cleaned.head(300), use_container_width=True)
-
-    out_buf = io.BytesIO()
-    with pd.ExcelWriter(out_buf, engine="openpyxl") as writer:
-        cleaned.to_excel(writer, index=False, sheet_name="Cleaned")
-    st.download_button(
-        "Download cleaned file (.xlsx)",
-        data=out_buf.getvalue(),
-        file_name="taxonomy_guardian_output.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+            st.sidebar.warning("⚠️ No brand reference data available.")
+    
+    st.sidebar.header("⚙️ Advanced Settings")
+    
+    log_changes_only = st.sidebar.checkbox(
+        "Log only changes",
+        value=True,
+        help="Only log rows that were flagged or changed"
     )
+    
+    max_logs = st.sidebar.number_input(
+        "Maximum log entries:",
+        min_value=50,
+        max_value=1000,
+        value=200,
+        step=50
+    )
+    
+    run_cleanup = st.sidebar.button(
+        "🚀 Run Cleanup",
+        use_container_width=True,
+        type="primary"
+    )
+    
+    return (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
+            selected_brand, log_changes_only, max_logs, run_cleanup)
 
-    if "Suggested Brand" in cleaned.columns:
-        mask_new = cleaned["Suggested Brand"].astype(str).str.endswith("(NEW)")
-        new_rows = cleaned.loc[mask_new, [
-            "FIDO","BARCODE","DESCRIPTION","BRAND","MANUFACTURER","Suggested Brand","Match Strength"
-        ]].copy()
-        if not new_rows.empty:
-            buf2 = io.BytesIO()
-            with pd.ExcelWriter(buf2, engine="openpyxl") as writer:
-                new_rows.to_excel(writer, index=False, sheet_name="NEW_Suggestions")
+def render_results(df: pd.DataFrame):
+    st.subheader("📊 Results")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Total Rows", len(df))
+    
+    with col2:
+        if "Correct Brand?" in df.columns:
+            correct_brands = len(df[df["Correct Brand?"] == "Y"])
+            st.metric("Correct Brands", correct_brands)
+    
+    with col3:
+        if "Correct Categories?" in df.columns:
+            correct_categories = len(df[df["Correct Categories?"] == "Y"])
+            st.metric("Correct Categories", correct_categories)
+    
+    with col4:
+        if "Suggested Brand" in df.columns:
+            suggestions = len(df[df["Suggested Brand"] != ""])
+            st.metric("Suggestions Made", suggestions)
+    
+    st.dataframe(df.head(100), use_container_width=True)
+    
+    # Download functionality
+    output_buffer = io.BytesIO()
+    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Cleaned_Data')
+    
+    st.download_button(
+        "📥 Download Cleaned File (.xlsx)",
+        data=output_buffer.getvalue(),
+        file_name=f"taxonomy_guardian_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
+    )
+    
+    # Export NEW suggestions
+    if "Suggested Brand" in df.columns:
+        new_suggestions = df[df["Suggested Brand"].str.endswith("(NEW)", na=False)]
+        
+        if not new_suggestions.empty:
+            st.subheader("🆕 New Brand Suggestions")
+            st.write(f"Found {len(new_suggestions)} products with potential new brands:")
+            
+            display_cols = ["FIDO", "BARCODE", "DESCRIPTION", "BRAND", "MANUFACTURER", "Suggested Brand", "Match Strength"]
+            available_cols = [col for col in display_cols if col in new_suggestions.columns]
+            
+            st.dataframe(new_suggestions[available_cols], use_container_width=True)
+            
+            new_buffer = io.BytesIO()
+            with pd.ExcelWriter(new_buffer, engine='openpyxl') as writer:
+                new_suggestions[available_cols].to_excel(writer, index=False, sheet_name='New_Brand_Suggestions')
+            
             st.download_button(
-                "Export NEW Suggestions (.xlsx)",
-                data=buf2.getvalue(),
-                file_name="taxonomy_guardian_NEW_suggestions.xlsx",
+                "📥 Download New Brand Suggestions (.xlsx)",
+                data=new_buffer.getvalue(),
+                file_name=f"taxonomy_guardian_new_brands_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                use_container_width=True
             )
 
+def render_logs():
+    with st.expander("📋 Application Logs", expanded=False):
+        logs = st.session_state.get("logs", [])
+        
+        if logs:
+            recent_logs = logs[-50:]
+            
+            for log_entry in reversed(recent_logs):
+                timestamp = log_entry.get("timestamp", "")
+                level = log_entry.get("level", "INFO")
+                message = log_entry.get("message", "")
+                
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    formatted_time = dt.strftime("%H:%M:%S")
+                except:
+                    formatted_time = timestamp[:8] if len(timestamp) > 8 else timestamp
+                
+                if level == "ERROR":
+                    st.error(f"[{formatted_time}] {message}")
+                elif level == "WARNING":
+                    st.warning(f"[{formatted_time}] {message}")
+                elif level == "SUCCESS":
+                    st.success(f"[{formatted_time}] {message}")
+                else:
+                    st.info(f"[{formatted_time}] {message}")
+        else:
+            st.info("No logs available")
+        
+        if st.button("🗑️ Clear Logs"):
+            clear_logs()
+            st.rerun()
+
 # =========================
-# Main
+# Main Application
 # =========================
 def main():
-    brand_df = load_brand_mfr_reference(sidebar=True)
-
-    uploaded, raw_df, cleanup_choice, selected_mfr, selected_brand, log_changes_only, max_logs, min_interval, run = sidebar_controls(brand_df)
-
-    st.subheader("Run")
-
-    if uploaded is None or raw_df is None:
-        st.info("Upload a data file to begin.")
-        with st.expander("Logs", expanded=False):
-            logs = st.session_state.get("logs", [])[-200:]
-            st.json(logs)
-        st.button("Clear logs", on_click=clear_logs)
+    brand_df = load_brand_reference(show_upload=True)
+    
+    (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
+     selected_brand, log_changes_only, max_logs, run_cleanup) = render_sidebar_controls(brand_df)
+    
+    st.header("🛡️ Data Cleanup Status")
+    
+    if uploaded_file is None:
+        st.info("👆 Upload a data file in the sidebar to get started")
+        
+        with st.expander("ℹ️ How to Use Taxonomy Guardian", expanded=True):
+            st.markdown("""
+            **Step 1:** Upload your data file (Excel or CSV) from Snowflake export
+            
+            **Step 2:** Select the type of cleanup you need:
+            - **Brand Accuracy**: Validates and suggests brand corrections
+            - **Category Hierarchy**: Ensures all 4 category levels are properly filled
+            - **Vague Description**: Identifies and improves unclear product descriptions
+            
+            **Step 3:** For Brand Accuracy, select your target manufacturer and brand
+            
+            **Step 4:** Click "Run Cleanup" to process your data
+            
+            **Step 5:** Review results and download the cleaned file
+            """)
+        
+        render_logs()
         return
-
-    if not run:
-        st.caption("File loaded. Choose settings and click **Run Cleanup** to process.")
-        with st.expander("Logs", expanded=False):
-            logs = st.session_state.get("logs", [])[-200:]
-            st.json(logs)
-        st.button("Clear logs", on_click=clear_logs)
+    
+    if raw_df is None:
+        st.error("❌ Failed to load the uploaded file.")
+        render_logs()
         return
-
+    
+    st.success(f"✅ File loaded: **{uploaded_file.name}**")
+    
+    file_col1, file_col2 = st.columns(2)
+    with file_col1:
+        st.metric("Rows", f"{len(raw_df):,}")
+    with file_col2:
+        st.metric("Columns", len(raw_df.columns))
+    
     try:
-        df = coerce_required_columns(raw_df)
+        processed_df = normalize_column_headers(raw_df)
+        missing_columns = [col for col in REQUIRED_COLUMNS if col not in processed_df.columns]
+        
+        if missing_columns:
+            st.warning(f"⚠️ Missing required columns (will be added as empty): {', '.join(missing_columns)}")
+        else:
+            st.success("✅ All required columns are present")
+    
     except Exception as e:
-        st.error(f"Failed to prepare data: {e}")
+        st.error(f"❌ Error processing file: {str(e)}")
+        render_logs()
         return
-
-    missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        st.warning(f"Missing required columns (auto-filled as empty): {', '.join(missing)}")
-
-    cleaned = df.copy()
-
-    if cleanup_choice == "Brand Accuracy":
-        if not selected_mfr or not selected_brand:
-            st.error("Please select both Manufacturer and Brand in the sidebar.")
+    
+    st.subheader(f"🔧 Selected Cleanup: {cleanup_type}")
+    
+    if cleanup_type == "Brand Accuracy":
+        if not selected_manufacturer or not selected_brand:
+            st.warning("⚠️ Please select both manufacturer and brand in the sidebar")
+            render_logs()
             return
-        with st.spinner("Running Brand Accuracy cleanup..."):
-            cleaned = brand_accuracy_cleanup(
-                cleaned,
-                brand_df,
-                selected_mfr=selected_mfr,
-                selected_brand=selected_brand,
-                log_changes_only=log_changes_only,
-                max_logs=max_logs,
-            )
-    elif cleanup_choice == "Category Hierarchy Cleanup":
-        with st.spinner("Running Category Hierarchy cleanup..."):
-            cleaned = category_hierarchy_cleanup(cleaned)
-    elif cleanup_choice == "Vague Description Cleanup":
-        with st.spinner("Running Vague Description cleanup..."):
-            cleaned = vague_description_cleanup(cleaned)
-
-    show_results(cleaned)
-
-    with st.expander("Logs", expanded=False):
-        logs = st.session_state.get("logs", [])[-200:]
-        st.json(logs)
-    st.button("Clear logs", on_click=clear_logs)
+        else:
+            st.success(f"🎯 Target: **{selected_manufacturer}** → **{selected_brand}**")
+    
+    if not run_cleanup:
+        st.info("👆 Click **Run Cleanup** in the sidebar to process your data")
+        render_logs()
+        return
+    
+    try:
+        log_event("INFO", f"Starting {cleanup_type} cleanup", 
+                  rows=len(processed_df),
+                  cleanup_type=cleanup_type)
+        
+        with st.spinner(f"🔄 Running {cleanup_type.lower()}..."):
+            
+            if cleanup_type == "Brand Accuracy":
+                cleaned_df = brand_accuracy_cleanup(
+                    processed_df, 
+                    brand_df, 
+                    selected_manufacturer, 
+                    selected_brand,
+                    log_changes_only, 
+                    max_logs
+                )
+            
+            elif cleanup_type == "Category Hierarchy Cleanup":
+                cleaned_df = category_hierarchy_cleanup(processed_df)
+            
+            elif cleanup_type == "Vague Description Cleanup":
+                cleaned_df = vague_description_cleanup(processed_df)
+            
+            else:
+                st.error("❌ Unknown cleanup type selected")
+                return
+        
+        st.success("✅ Cleanup completed successfully!")
+        log_event("SUCCESS", f"{cleanup_type} cleanup completed successfully")
+        
+        render_results(cleaned_df)
+    
+    except Exception as e:
+        error_msg = f"Error during {cleanup_type.lower()}: {str(e)}"
+        st.error(f"❌ {error_msg}")
+        log_event("ERROR", error_msg)
+        
+        with st.expander("🔧 Troubleshooting Tips", expanded=True):
+            st.markdown("""
+            **Common issues and solutions:**
+            
+            1. **File format errors**: Ensure your file is a valid Excel (.xlsx) or CSV format
+            2. **Memory errors**: Try processing smaller batches of data (< 10,000 rows)
+            3. **Network timeouts**: This is normal and expected for some operations
+            4. **Missing reference data**: Ensure the brand-manufacturer reference file is uploaded
+            5. **Column mapping**: Check that your data has the required column structure
+            
+            **If issues persist:** Check the application logs below for detailed error information.
+            """)
+    
+    render_logs()
 
 if __name__ == "__main__":
     main()
