@@ -402,6 +402,12 @@ def brand_accuracy_cleanup(
         match_confidence = "Low"
         matching_terms = []
         
+        # Log first few rows for debugging
+        if idx < 5:
+            log_event("INFO", f"Processing row {idx + 1}", 
+                      description=description[:100],
+                      expanded_types_sample=list(expanded_allowed_types)[:5])
+        
         # Primary check: description against allowed product types
         for product_type in expanded_allowed_types:
             product_type_clean = product_type.lower().strip()
@@ -409,6 +415,12 @@ def brand_accuracy_cleanup(
                 belongs_to_selected = True
                 match_confidence = "High"
                 matching_terms.append(product_type_clean)
+                
+                # Log successful matches for first few rows
+                if idx < 5:
+                    log_event("INFO", f"Row {idx + 1} MATCHED", 
+                              matched_term=product_type_clean,
+                              description=description[:50])
         
         # Universal conflict detection - check if product clearly belongs to different category
         if belongs_to_selected:
@@ -431,6 +443,13 @@ def brand_accuracy_cleanup(
                     if any(indicator in desc_lower for indicator in conflict_indicators):
                         belongs_to_selected = False
                         match_confidence = "High"  # High confidence it doesn't belong
+                        
+                        # Log conflicts for first few rows
+                        if idx < 5:
+                            found_conflicts = [ind for ind in conflict_indicators if ind in desc_lower]
+                            log_event("INFO", f"Row {idx + 1} CONFLICT DETECTED", 
+                                      conflicts_found=found_conflicts,
+                                      description=description[:50])
                         break
         
         # Secondary check: use categories if description is unclear or vague
