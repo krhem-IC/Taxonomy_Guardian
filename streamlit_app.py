@@ -342,7 +342,11 @@ def brand_accuracy_cleanup(
     allowed_types = get_allowed_product_types(brand_df, selected_brand)
     selected_brand_lower = selected_brand.lower()
     
-    # Build expanded allowed product types with related terms - GENERIC approach
+    # Debug: Log the allowed product types for selected brand
+    log_event("DEBUG", "Brand matching setup", 
+              selected_brand=selected_brand,
+              allowed_types=allowed_types,
+              expanded_types=list(expanded_allowed_types)[:10])  # Log first 10 for debugging
     expanded_allowed_types = set(allowed_types)
     for product_type in allowed_types:
         # Add common variations for any product type
@@ -400,15 +404,39 @@ def brand_accuracy_cleanup(
         
         # Primary check: description against allowed product types
         for product_type in expanded_allowed_types:
-            if len(product_type) > 2 and product_type in desc_lower:
+            product_type_clean = product_type.lower().strip()
+            if len(product_type_clean) > 2 and product_type_clean in desc_lower:
                 belongs_to_selected = True
                 match_confidence = "High"
-                matching_terms.append(product_type)
+                matching_terms.append(product_type_clean)
+        
+        # Universal conflict detection - check if product clearly belongs to different category
+        if belongs_to_selected:
+            # Define conflicting product categories
+            conflicts = {
+                'chips': ['wine', 'alcohol', 'beverage', 'ml', '750', 'vintage', 'cabernet', 'merlot', 'sauvignon'],
+                'wine': ['chips', 'snacks', 'crackers', 'crisps', 'oz', 'bag'],
+                'fitness': ['food', 'snacks', 'ml', 'wine', 'beverage'],
+                'oil': ['chips', 'wine', 'fitness', 'electronic', 'clothing'],
+                'pasta': ['wine', 'chips', 'fitness', 'electronic'],
+                'supplement': ['wine', 'chips', 'fitness equipment', 'clothing'],
+                'tile': ['food', 'beverage', 'wine', 'chips', 'supplement']
+            }
+            
+            # Check if current allowed types conflict with description
+            for allowed_type in allowed_types:
+                allowed_clean = allowed_type.lower().strip()
+                if allowed_clean in conflicts:
+                    conflict_indicators = conflicts[allowed_clean]
+                    if any(indicator in desc_lower for indicator in conflict_indicators):
+                        belongs_to_selected = False
+                        match_confidence = "High"  # High confidence it doesn't belong
+                        break
         
         # Secondary check: use categories if description is unclear or vague
         if not belongs_to_selected and (len(desc_lower.split()) < 4 or any(vague in desc_lower for vague in ['assorted', 'variety', 'misc'])):
             for product_type in expanded_allowed_types:
-                if len(product_type) > 2 and product_type in category_text:
+                if len(product_type) > 2 and product_type.lower() in category_text:
                     belongs_to_selected = True
                     match_confidence = "Medium"
                     matching_terms.append(product_type)
@@ -418,21 +446,31 @@ def brand_accuracy_cleanup(
         if belongs_to_selected:
             df.at[idx, "Correct Brand?"] = "Y"
             df.at[idx, "Match Strength"] = match_confidence
+            df.at[idx, "Suggested Brand"] = ""  # Clear suggestion for Y items
             continue
         
         # Step 2: Product doesn't belong to selected brand - suggest appropriate brand
         df.at[idx, "Correct Brand?"] = "N"
         
-        # Try to extract brand from description first
-        suggested_brand = extract_brand_from_description_universal(description, desc_lower, master_brands)
+        # CRITICAL: Never suggest the selected brand for N items
+        suggested_brand = None
+        
+        # Try to extract brand from description (but exclude selected brand)
+        potential_brand = extract_brand_from_description_universal(description, desc_lower, master_brands)
+        if potential_brand and potential_brand.lower() != selected_brand_lower:
+            suggested_brand = potential_brand
         
         if not suggested_brand:
-            # Try category-based suggestions
-            suggested_brand = suggest_brand_from_categories_universal(category_text, brand_df)
+            # Try category-based suggestions (exclude selected brand)
+            potential_brand = suggest_brand_from_categories_universal(category_text, brand_df)
+            if potential_brand and potential_brand.lower() != selected_brand_lower:
+                suggested_brand = potential_brand
         
         if not suggested_brand:
-            # Try product-type based suggestions using master brand file
-            suggested_brand = suggest_brand_from_product_type_universal(desc_lower, brand_df)
+            # Try product-type based suggestions (exclude selected brand)
+            potential_brand = suggest_brand_from_product_type_universal(desc_lower, brand_df)
+            if potential_brand and potential_brand.lower() != selected_brand_lower:
+                suggested_brand = potential_brand
         
         if not suggested_brand:
             # Final fallback - mark for UPC lookup or extract potential brand
@@ -442,10 +480,16 @@ def brand_accuracy_cleanup(
                 match_confidence = "UPC"
             else:
                 # Extract potential brand from description as last resort
-                suggested_brand = extract_potential_new_brand_universal(description)
+                potential_brand = extract_potential_new_brand_universal(description)
+                if potential_brand and not potential_brand.lower().startswith(selected_brand_lower):
+                    suggested_brand = potential_brand
         
-        df.at[idx, "Suggested Brand"] = suggested_brand or "Unknown Brand"
-        df.at[idx, "Match Strength"] = match_confidence if suggested_brand else "Low"
+        # Final safety check - never suggest the selected brand for N items
+        if not suggested_brand or suggested_brand.lower() == selected_brand_lower:
+            suggested_brand = "Unknown Brand - Requires Review"
+        
+        df.at[idx, "Suggested Brand"] = suggested_brand
+        df.at[idx, "Match Strength"] = "Low"
         
         # Log changes
         if log_changes_only and changes_logged < max_logs:
@@ -471,6 +515,45 @@ def brand_accuracy_cleanup(
 
 def extract_brand_from_description_universal(description: str, desc_lower: str, master_brands: set) -> Optional[str]:
     """Universal brand extraction that works for any brand"""
+    
+    # Universal brand pattern detection based on product type
+    product_brand_patterns = {
+        # Wine patterns
+        ('wine', 'ml', '750', 'vintage', 'cabernet', 'merlot', 'sauvignon'): [
+            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:cabernet|merlot|sauvignon|wine|vintage|\d+\s*ml))',
+            r'\b([A-Z][a-zA-Z]+)\s+(?:cabernet|merlot|sauvignon|wine)',
+        ],
+        # Fitness patterns  
+        ('fitness', 'workout', 'exercise', 'belt'): [
+            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:fitness|workout|exercise|belt))',
+        ],
+        # Food/snack patterns
+        ('chips', 'snacks', 'crackers', 'cookies'): [
+            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:chips|snacks|crackers|cookies))',
+        ],
+        # Oil patterns
+        ('oil', 'olive'): [
+            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:oil|olive))',
+        ]
+    }
+    
+    # Try pattern matching based on product type in description
+    for indicators, patterns in product_brand_patterns.items():
+        if any(indicator in desc_lower for indicator in indicators):
+            for pattern in patterns:
+                match = re.search(pattern, description, re.IGNORECASE)
+                if match:
+                    potential_brand = match.group(1).strip()
+                    potential_lower = potential_brand.lower()
+                    
+                    # Check if exact match in master brands
+                    if potential_lower in master_brands:
+                        return potential_brand.title()
+                    
+                    # Check for partial matches
+                    for master_brand in master_brands:
+                        if potential_lower in master_brand or master_brand in potential_lower:
+                            return master_brand.title()
     
     # Look for any master brand that appears in the description
     best_brand = None
