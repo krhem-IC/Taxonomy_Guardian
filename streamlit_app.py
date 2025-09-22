@@ -342,6 +342,34 @@ def brand_accuracy_cleanup(
     allowed_types = get_allowed_product_types(brand_df, selected_brand)
     selected_brand_lower = selected_brand.lower()
     
+    # Build expanded allowed product types with related terms - GENERIC approach
+    expanded_allowed_types = set(allowed_types)
+    for product_type in allowed_types:
+        # Add common variations for any product type
+        words = product_type.split()
+        for word in words:
+            expanded_allowed_types.add(word)  # Add individual words
+            
+            # Add common variations based on word patterns
+            if word.endswith('s'):
+                expanded_allowed_types.add(word[:-1])  # chips -> chip
+            else:
+                expanded_allowed_types.add(word + 's')  # chip -> chips
+                
+            # Add common product variations
+            if 'chip' in word.lower():
+                expanded_allowed_types.update(['chips', 'crisps', 'crackers'])
+            elif 'wine' in word.lower():
+                expanded_allowed_types.update(['wine', 'vino', 'vintage'])
+            elif 'pasta' in word.lower():
+                expanded_allowed_types.update(['pasta', 'noodles', 'ravioli'])
+            elif 'oil' in word.lower():
+                expanded_allowed_types.update(['oil', 'oils', 'cooking oil'])
+            elif 'protein' in word.lower():
+                expanded_allowed_types.update(['protein', 'powder', 'supplement'])
+            elif 'cookie' in word.lower():
+                expanded_allowed_types.update(['cookie', 'cookies', 'baked goods'])
+    
     df["Correct Brand?"] = "N"
     df["Suggested Brand"] = ""
     df["Match Strength"] = ""
@@ -355,67 +383,77 @@ def brand_accuracy_cleanup(
         progress_bar.progress(progress)
         status_text.text(f"Processing row {idx + 1} of {total_rows}")
         
-        current_brand = safe_str(row.get("BRAND", "")).lower()
         description = safe_str(row.get("DESCRIPTION", ""))
+        desc_lower = description.lower()
+        categories = [
+            safe_str(row.get("CATEGORY_1", "")),
+            safe_str(row.get("CATEGORY_2", "")),
+            safe_str(row.get("CATEGORY_3", "")),
+            safe_str(row.get("CATEGORY_4", ""))
+        ]
+        category_text = " ".join(categories).lower()
         
-        is_generic = (
-            not current_brand or 
-            current_brand in {"", "none", "null", "nan", "n/a", "na"} or
-            current_brand in GENERIC_BRAND_TERMS
-        )
-        
+        # Step 1: Check if description matches selected brand's allowed product types
         belongs_to_selected = False
-        if allowed_types:
-            for product_type in allowed_types:
-                if product_type in description.lower():
-                    belongs_to_selected = True
-                    break
-        else:
-            belongs_to_selected = selected_brand_lower in description.lower()
+        match_confidence = "Low"
+        matching_terms = []
         
-        if not is_generic and belongs_to_selected:
+        # Primary check: description against allowed product types
+        for product_type in expanded_allowed_types:
+            if len(product_type) > 2 and product_type in desc_lower:
+                belongs_to_selected = True
+                match_confidence = "High"
+                matching_terms.append(product_type)
+        
+        # Secondary check: use categories if description is unclear or vague
+        if not belongs_to_selected and (len(desc_lower.split()) < 4 or any(vague in desc_lower for vague in ['assorted', 'variety', 'misc'])):
+            for product_type in expanded_allowed_types:
+                if len(product_type) > 2 and product_type in category_text:
+                    belongs_to_selected = True
+                    match_confidence = "Medium"
+                    matching_terms.append(product_type)
+                    break
+        
+        # Mark as correct if product belongs to selected brand's portfolio
+        if belongs_to_selected:
             df.at[idx, "Correct Brand?"] = "Y"
-            df.at[idx, "Match Strength"] = "High"
+            df.at[idx, "Match Strength"] = match_confidence
             continue
         
-        # Look for brand suggestions
-        suggestion = ""
-        strength = "Low"
+        # Step 2: Product doesn't belong to selected brand - suggest appropriate brand
+        df.at[idx, "Correct Brand?"] = "N"
         
-        # Check for master brand matches in description
-        best_brand = None
-        best_length = 0
+        # Try to extract brand from description first
+        suggested_brand = extract_brand_from_description_universal(description, desc_lower, master_brands)
         
-        for brand in master_brands:
-            if len(brand) > 2 and brand in description.lower():
-                pattern = r'\b' + re.escape(brand) + r'\b'
-                if re.search(pattern, description.lower()) and len(brand) > best_length:
-                    best_brand = brand
-                    best_length = len(brand)
+        if not suggested_brand:
+            # Try category-based suggestions
+            suggested_brand = suggest_brand_from_categories_universal(category_text, brand_df)
         
-        if best_brand and best_brand != selected_brand_lower:
-            suggestion = best_brand.title()
-            strength = "High"
-        else:
-            # Try family-based suggestion
-            family = detect_product_family(description)
-            if family:
-                suggestion = f"{selected_brand} {family}"
-                strength = "Medium"
+        if not suggested_brand:
+            # Try product-type based suggestions using master brand file
+            suggested_brand = suggest_brand_from_product_type_universal(desc_lower, brand_df)
+        
+        if not suggested_brand:
+            # Final fallback - mark for UPC lookup or extract potential brand
+            barcode = safe_str(row.get("BARCODE", ""))
+            if barcode and barcode.isdigit() and len(barcode) >= 8:
+                suggested_brand = "UPC Lookup Required"
+                match_confidence = "UPC"
             else:
-                suggestion = "Unclear"
-                strength = "Low"
+                # Extract potential brand from description as last resort
+                suggested_brand = extract_potential_new_brand_universal(description)
         
-        df.at[idx, "Suggested Brand"] = suggestion
-        df.at[idx, "Match Strength"] = strength
+        df.at[idx, "Suggested Brand"] = suggested_brand or "Unknown Brand"
+        df.at[idx, "Match Strength"] = match_confidence if suggested_brand else "Low"
         
         # Log changes
-        if log_changes_only and changes_logged < max_logs and df.at[idx, "Correct Brand?"] == "N":
+        if log_changes_only and changes_logged < max_logs:
             log_event("INFO", "Brand correction needed",
                       fido=safe_str(row.get("FIDO")),
-                      current_brand=current_brand,
-                      suggested_brand=suggestion,
-                      strength=strength)
+                      description=description[:100],
+                      suggested_brand=suggested_brand,
+                      matching_terms=", ".join(matching_terms) if matching_terms else "None")
             changes_logged += 1
     
     progress_bar.progress(1.0)
@@ -430,6 +468,127 @@ def brand_accuracy_cleanup(
               total_rows=len(df))
     
     return df
+
+def extract_brand_from_description_universal(description: str, desc_lower: str, master_brands: set) -> Optional[str]:
+    """Universal brand extraction that works for any brand"""
+    
+    # Look for any master brand that appears in the description
+    best_brand = None
+    best_length = 0
+    
+    for brand in master_brands:
+        if len(brand) > 3 and brand in desc_lower:
+            # Check for whole word match to avoid false positives
+            pattern = r'\b' + re.escape(brand) + r'\b'
+            if re.search(pattern, desc_lower) and len(brand) > best_length:
+                best_brand = brand
+                best_length = len(brand)
+    
+    if best_brand:
+        return best_brand.title()
+    
+    # Look for brand patterns (capitalized words near start of description)
+    words = description.split()
+    for i, word in enumerate(words[:5]):  # Check first 5 words
+        if word and word[0].isupper() and len(word) > 2:
+            # Check if this might be a brand (not a common word)
+            if word.lower() not in {'premium', 'natural', 'organic', 'fresh', 'new', 'improved'}:
+                # Check if followed by another capitalized word
+                if i < len(words) - 1 and words[i + 1] and words[i + 1][0].isupper():
+                    potential_brand = f"{word} {words[i + 1]}"
+                    # Check if it's in master brands
+                    if potential_brand.lower() in master_brands:
+                        return potential_brand
+                elif word.lower() in master_brands:
+                    return word
+    
+    return None
+
+def suggest_brand_from_categories_universal(category_text: str, brand_df: Optional[pd.DataFrame]) -> Optional[str]:
+    """Universal category-based brand suggestion using master brand file"""
+    
+    if brand_df is None:
+        return None
+    
+    # Extract meaningful category terms
+    category_words = [word for word in category_text.split() if len(word) > 3]
+    
+    # Look for brands that might match these categories
+    for _, brand_row in brand_df.iterrows():
+        allowed_types = safe_str(brand_row.get("ALLOWED_PRODUCT_TYPES", "")).lower()
+        brand_name = safe_str(brand_row.get("BRAND", ""))
+        
+        if allowed_types:
+            # Check if any category words match the allowed product types
+            for category_word in category_words:
+                if category_word in allowed_types:
+                    return brand_name
+    
+    return None
+
+def suggest_brand_from_product_type_universal(desc_lower: str, brand_df: Optional[pd.DataFrame]) -> Optional[str]:
+    """Universal product-type matching using the brand master file"""
+    
+    if brand_df is None:
+        return None
+    
+    # Extract key product indicators from description
+    product_indicators = []
+    common_products = ['wine', 'pasta', 'chips', 'protein', 'cookies', 'oil', 'fitness', 'tile', 'supplement']
+    
+    for product in common_products:
+        if product in desc_lower:
+            product_indicators.append(product)
+    
+    # Find brands that sell these product types
+    for _, brand_row in brand_df.iterrows():
+        allowed_types = safe_str(brand_row.get("ALLOWED_PRODUCT_TYPES", "")).lower()
+        brand_name = safe_str(brand_row.get("BRAND", ""))
+        
+        if allowed_types and product_indicators:
+            # Check if any product indicators match this brand's allowed types
+            for indicator in product_indicators:
+                if indicator in allowed_types:
+                    return brand_name
+    
+    return None
+
+def extract_potential_new_brand_universal(description: str) -> Optional[str]:
+    """Universal brand extraction for potential new brands"""
+    
+    # Look for patterns that suggest brand names
+    words = description.split()
+    
+    # Common brand patterns:
+    # 1. First 1-2 capitalized words
+    # 2. Words followed by product indicators
+    # 3. Possessive patterns (Brand's Product)
+    
+    potential_brands = []
+    
+    # Pattern 1: First few capitalized words
+    for i, word in enumerate(words[:3]):
+        if word and len(word) > 2 and word[0].isupper():
+            if word.lower() not in {'premium', 'natural', 'organic', 'fresh', 'new', 'improved', 'best', 'great'}:
+                if i < len(words) - 1 and words[i + 1] and words[i + 1][0].isupper():
+                    potential_brands.append(f"{word} {words[i + 1]}")
+                else:
+                    potential_brands.append(word)
+    
+    # Pattern 2: Words before common product types
+    product_keywords = ['chips', 'wine', 'pasta', 'protein', 'cookies', 'oil', 'supplement', 'fitness']
+    for i, word in enumerate(words):
+        if word.lower() in product_keywords and i > 0:
+            prev_word = words[i - 1]
+            if prev_word and len(prev_word) > 2 and prev_word[0].isupper():
+                potential_brands.append(prev_word)
+    
+    # Return the first reasonable potential brand
+    for brand in potential_brands:
+        if len(brand) >= 3:
+            return f"{brand} (NEW)"
+    
+    return None
 
 def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     log_event("INFO", "Starting category hierarchy cleanup", rows=len(df))
@@ -604,6 +763,19 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
         use_container_width=True,
         type="primary"
     )
+    
+    # Add clear form button
+    if st.sidebar.button(
+        "🗑️ Clear Form", 
+        use_container_width=True,
+        help="Clear uploaded file and reset form"
+    ):
+        # Clear session state
+        if "_last_file_key" in st.session_state:
+            del st.session_state["_last_file_key"]
+        if "_raw_df" in st.session_state:
+            del st.session_state["_raw_df"]
+        st.rerun()
     
     return (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
             selected_brand, log_changes_only, max_logs, run_cleanup)
