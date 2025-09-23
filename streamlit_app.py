@@ -96,24 +96,27 @@ def safe_str(value) -> str:
     return str(value).strip()
 
 def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize column headers to match required format - FIXED VERSION"""
+    """Normalize column headers to match required format - SAFER VERSION"""
     df = df.copy()
     
     # Debug: log original column structure
     log_event("INFO", "File column analysis", 
-              original_columns=df.columns.tolist()[:20],
+              original_columns=df.columns.tolist()[:15],
               total_columns=len(df.columns),
-              sample_data=df.iloc[0].tolist()[:10] if not df.empty else [])
+              first_row_sample=df.iloc[0].tolist()[:8] if not df.empty else [])
     
-    # Remove completely empty columns first
-    df = df.dropna(axis=1, how='all')
-    df = df.loc[:, df.columns.notna()]  # Remove columns with NaN names
+    # GENTLE cleaning - only remove columns that are completely unnamed and empty
+    columns_to_keep = []
+    for col in df.columns:
+        col_str = str(col)
+        # Keep column if it has a real name OR if it contains any data
+        if not col_str.startswith('Unnamed') or not df[col].isna().all():
+            columns_to_keep.append(col)
     
-    # Remove unnamed columns (Excel sometimes adds these)
-    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    df = df[columns_to_keep]
     
-    log_event("INFO", "After cleaning empty columns", 
-              cleaned_columns=df.columns.tolist(),
+    log_event("INFO", "After gentle cleaning", 
+              cleaned_columns=df.columns.tolist()[:15],
               remaining_rows=len(df))
     
     # Create mapping from incoming columns to required columns
