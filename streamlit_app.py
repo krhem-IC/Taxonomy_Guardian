@@ -96,7 +96,27 @@ def safe_str(value) -> str:
     return str(value).strip()
 
 def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize column headers to match required format - FIXED VERSION"""
     df = df.copy()
+    
+    # Debug: log original column structure
+    log_event("INFO", "File column analysis", 
+              original_columns=df.columns.tolist()[:20],
+              total_columns=len(df.columns),
+              sample_data=df.iloc[0].tolist()[:10] if not df.empty else [])
+    
+    # Remove completely empty columns first
+    df = df.dropna(axis=1, how='all')
+    df = df.loc[:, df.columns.notna()]  # Remove columns with NaN names
+    
+    # Remove unnamed columns (Excel sometimes adds these)
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    
+    log_event("INFO", "After cleaning empty columns", 
+              cleaned_columns=df.columns.tolist(),
+              remaining_rows=len(df))
+    
+    # Create mapping from incoming columns to required columns
     column_mapping = {}
     normalized_incoming = {col: col.strip().upper() for col in df.columns}
     
@@ -104,9 +124,12 @@ def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
         if normalized_col in REQUIRED_COLUMNS:
             column_mapping[incoming_col] = normalized_col
     
+    # Rename columns
     if column_mapping:
         df = df.rename(columns=column_mapping)
+        log_event("INFO", "Column mapping applied", mapping=column_mapping)
     
+    # Add missing required columns as empty strings
     for col in REQUIRED_COLUMNS:
         if col not in df.columns:
             df[col] = ""
@@ -316,12 +339,41 @@ def brand_accuracy_cleanup(
         description = safe_str(row.get("DESCRIPTION", ""))
         desc_lower = description.lower()
         
-        # SIMPLE MATCHING: Check if description contains any allowed product type
+        # Debug logging for first few rows to see what data we're getting
+        if idx < 3:
+            log_event("INFO", f"Row {idx + 1} debug", 
+                      description=description,
+                      description_length=len(description),
+                      all_columns=list(row.keys())[:10])  # Show first 10 column names
+        
+        # ENHANCED MATCHING: Check if description contains any allowed product type or variations
         belongs_to_selected = False
         for product_type in allowed_types:
-            if product_type.lower() in desc_lower:
+            pt_lower = product_type.lower().strip()
+            
+            # Direct match
+            if pt_lower in desc_lower:
                 belongs_to_selected = True
                 break
+            
+            # Add basic variations for common patterns
+            if pt_lower == "chips":
+                if any(term in desc_lower for term in ["chip", "chips", "crisps"]):
+                    belongs_to_selected = True
+                    break
+            elif pt_lower == "veggie chips":
+                if any(term in desc_lower for term in ["veggie chip", "vegetable chip", "beet chip", "sweet potato chip"]):
+                    belongs_to_selected = True
+                    break
+            elif pt_lower == "snacks":
+                if any(term in desc_lower for term in ["snack", "snacks"]):
+                    belongs_to_selected = True
+                    break
+            # Add powder/supplement matching for Terra Kai products
+            elif "powder" in pt_lower or "supplement" in pt_lower:
+                if any(term in desc_lower for term in ["powder", "supplement"]):
+                    belongs_to_selected = True
+                    break
         
         # Check for wine conflicts (specific to chips brands)
         if belongs_to_selected and any('chip' in pt.lower() for pt in allowed_types):
@@ -349,7 +401,15 @@ def brand_accuracy_cleanup(
         # Final fallback
         if not suggested_brand:
             if any(wine_ind in desc_lower for wine_ind in ['ml', '750', 'wine', 'cabernet']):
-                suggested_brand = "Wine Brand (Review Required)"
+                # Look for specific wine Terra brands
+                if 'terra valentine' in desc_lower or 'valentine' in desc_lower:
+                    suggested_brand = "Terra D'Oro"
+                elif 'terra blanca' in desc_lower or 'blanca' in desc_lower:
+                    suggested_brand = "Terra Blanca"
+                elif 'terra vega' in desc_lower or 'vega' in desc_lower:
+                    suggested_brand = "Terra Wine"
+                else:
+                    suggested_brand = "Terra Wine"  # Generic wine Terra brand
             else:
                 suggested_brand = "Unknown Brand"
         
@@ -541,11 +601,14 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     )
     
     # Add clear form button
-    if st.sidebar.button(
+    clear_form = st.sidebar.button(
         "🗑️ Clear Form", 
         use_container_width=True,
         help="Clear uploaded file and reset form"
-    ):
+    )
+    
+    if clear_form:
+        # Clear session state
         if "_last_file_key" in st.session_state:
             del st.session_state["_last_file_key"]
         if "_raw_df" in st.session_state:
