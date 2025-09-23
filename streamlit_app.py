@@ -1,7 +1,5 @@
 # streamlit_app.py
-# Taxonomy Guardian - Clean working version with enhancements
-# Brand Accuracy with master mapping, cleaned phrases, heuristics,
-# UPC safety-net (OpenFoodFacts + optional UPCItemDB), and "(UPC Lookup)" strength label.
+# Taxonomy Guardian - Final clean version without variable scope issues
 
 import io
 import re
@@ -20,7 +18,6 @@ import pandas as pd
 try:
     import streamlit as st
 except ImportError:
-    # Mock streamlit for testing
     class MockSt:
         def __init__(self):
             self.sidebar = self
@@ -212,6 +209,7 @@ def get_master_brand_set(brand_df: Optional[pd.DataFrame]) -> set:
     return set(brand_df["BRAND"].astype(str).str.strip().str.lower())
 
 def get_allowed_product_types(brand_df: pd.DataFrame, brand_name: str) -> List[str]:
+    """Get allowed product types for a specific brand"""
     if brand_df is None or "ALLOWED_PRODUCT_TYPES" not in brand_df.columns:
         return []
     
@@ -220,14 +218,34 @@ def get_allowed_product_types(brand_df: pd.DataFrame, brand_name: str) -> List[s
         return []
     
     allowed_types_raw = safe_str(brand_rows.iloc[0].get("ALLOWED_PRODUCT_TYPES", ""))
-    if not allowed_types_raw:
+    if not allowed_types_raw or allowed_types_raw == "nan":
         return []
     
     return [t.strip().lower() for t in allowed_types_raw.split(",") if t.strip()]
 
 # =========================
-# Enhanced Processing Functions
+# Brand Processing Functions
 # =========================
+def extract_brand_from_description(description: str, master_brands: set) -> Optional[str]:
+    """Extract brand from description"""
+    desc_lower = description.lower()
+    
+    # Look for any master brand that appears in the description
+    best_brand = None
+    best_length = 0
+    
+    for brand in master_brands:
+        if len(brand) > 3 and brand in desc_lower:
+            pattern = r'\b' + re.escape(brand) + r'\b'
+            if re.search(pattern, desc_lower) and len(brand) > best_length:
+                best_brand = brand
+                best_length = len(brand)
+    
+    if best_brand:
+        return best_brand.title()
+    
+    return None
+
 def detect_product_family(description: str) -> Optional[str]:
     desc_lower = description.lower()
     
@@ -243,72 +261,6 @@ def detect_product_family(description: str) -> Optional[str]:
         return "Fitness"
     
     return None
-
-def suggest_category_improvements(description: str, current_categories: Tuple) -> Tuple[str, str, str, str]:
-    """Suggest improved categories based on description"""
-    desc_lower = description.lower()
-    
-    # Wine categories
-    if any(term in desc_lower for term in ["wine", "merlot", "cabernet", "pinot"]):
-        return ("Food", "Beverages", "Alcoholic", "Wine")
-    
-    # Coffee categories
-    if any(term in desc_lower for term in ["coffee", "espresso", "k-cup"]):
-        return ("Food", "Beverages", "Non-Alcoholic", "Coffee")
-    
-    # Supplement categories
-    if any(term in desc_lower for term in ["vitamin", "supplement", "capsule"]):
-        return ("Health & Beauty", "Supplements", "Vitamins", "Multivitamins")
-    
-    # Snack categories
-    if any(term in desc_lower for term in ["chips", "nuts", "crackers"]):
-        return ("Food", "Snacks", "Chips & Nuts", "Mixed")
-    
-    # Default: try to fill missing categories logically
-    cat1, cat2, cat3, cat4 = current_categories
-    
-    if not cat1:
-        cat1 = "Food"  # Most common
-    if not cat2:
-        cat2 = "Other"
-    if not cat3:
-        cat3 = "Miscellaneous"
-    if not cat4:
-        cat4 = "General"
-    
-    return (cat1, cat2, cat3, cat4)
-
-def improve_description(description: str, brand: str = "") -> str:
-    """Suggest improved description"""
-    desc = safe_str(description).strip()
-    
-    if not desc:
-        return "Product description needed"
-    
-    improved = desc
-    
-    # Replace vague terms with more specific ones
-    replacements = {
-        "assorted": "Mixed Variety",
-        "variety pack": "Multi-Pack Selection",
-        "mixed": "Assorted Selection",
-        "misc": "Miscellaneous Items",
-        "pack of": "Multi-Pack",
-        "various": "Multiple Varieties"
-    }
-    
-    for vague_term, improvement in replacements.items():
-        improved = re.sub(r'\b' + re.escape(vague_term) + r'\b', improvement, improved, flags=re.IGNORECASE)
-    
-    # Add brand if missing and description is short
-    if brand and brand.lower() not in improved.lower() and len(improved.split()) < 3:
-        improved = f"{brand} {improved}"
-    
-    # Clean up formatting
-    improved = re.sub(r'\s+', ' ', improved).strip()
-    improved = improved[0].upper() + improved[1:] if improved else improved
-    
-    return improved
 
 # =========================
 # Main Cleanup Functions
@@ -338,41 +290,15 @@ def brand_accuracy_cleanup(
     progress_bar = st.progress(0)
     status_text = st.empty()
     
+    # Get brand information - SIMPLE VERSION
     master_brands = get_master_brand_set(brand_df)
     allowed_types = get_allowed_product_types(brand_df, selected_brand)
     selected_brand_lower = selected_brand.lower()
     
-    # Debug: Log the allowed product types for selected brand
-    log_event("DEBUG", "Brand matching setup", 
+    # Debug logging
+    log_event("INFO", "Brand matching setup", 
               selected_brand=selected_brand,
-              allowed_types=allowed_types,
-              expanded_types=list(expanded_allowed_types)[:10])  # Log first 10 for debugging
-    expanded_allowed_types = set(allowed_types)
-    for product_type in allowed_types:
-        # Add common variations for any product type
-        words = product_type.split()
-        for word in words:
-            expanded_allowed_types.add(word)  # Add individual words
-            
-            # Add common variations based on word patterns
-            if word.endswith('s'):
-                expanded_allowed_types.add(word[:-1])  # chips -> chip
-            else:
-                expanded_allowed_types.add(word + 's')  # chip -> chips
-                
-            # Add common product variations
-            if 'chip' in word.lower():
-                expanded_allowed_types.update(['chips', 'crisps', 'crackers'])
-            elif 'wine' in word.lower():
-                expanded_allowed_types.update(['wine', 'vino', 'vintage'])
-            elif 'pasta' in word.lower():
-                expanded_allowed_types.update(['pasta', 'noodles', 'ravioli'])
-            elif 'oil' in word.lower():
-                expanded_allowed_types.update(['oil', 'oils', 'cooking oil'])
-            elif 'protein' in word.lower():
-                expanded_allowed_types.update(['protein', 'powder', 'supplement'])
-            elif 'cookie' in word.lower():
-                expanded_allowed_types.update(['cookie', 'cookies', 'baked goods'])
+              allowed_types=allowed_types)
     
     df["Correct Brand?"] = "N"
     df["Suggested Brand"] = ""
@@ -389,105 +315,43 @@ def brand_accuracy_cleanup(
         
         description = safe_str(row.get("DESCRIPTION", ""))
         desc_lower = description.lower()
-        categories = [
-            safe_str(row.get("CATEGORY_1", "")),
-            safe_str(row.get("CATEGORY_2", "")),
-            safe_str(row.get("CATEGORY_3", "")),
-            safe_str(row.get("CATEGORY_4", ""))
-        ]
-        category_text = " ".join(categories).lower()
         
-        # Step 1: Check if description matches selected brand's allowed product types
+        # SIMPLE MATCHING: Check if description contains any allowed product type
         belongs_to_selected = False
-        match_confidence = "Low"
-        matching_terms = []
-        
-        # Log first few rows for debugging
-        if idx < 5:
-            log_event("INFO", f"Processing row {idx + 1}", 
-                      description=description[:100],
-                      product_types_sample=product_types_to_match[:5])
-        
-        # Primary check: description against allowed product types
-        for product_type in product_types_to_match:
-            if len(product_type) > 2 and product_type in desc_lower:
+        for product_type in allowed_types:
+            if product_type.lower() in desc_lower:
                 belongs_to_selected = True
-                match_confidence = "High"
-                matching_terms.append(product_type)
-                
-                # Log successful matches for first few rows
-                if idx < 5:
-                    log_event("INFO", f"Row {idx + 1} MATCHED", 
-                              matched_term=product_type,
-                              description=description[:50])
+                break
         
-        # Check for wine conflicts (if we're checking chips brand but find wine indicators)
-        wine_indicators = ['ml', '750', 'cabernet', 'merlot', 'sauvignon', 'wine', 'vintage']
-        if belongs_to_selected and any('chip' in pt for pt in product_types_to_match):
+        # Check for wine conflicts (specific to chips brands)
+        if belongs_to_selected and any('chip' in pt.lower() for pt in allowed_types):
+            wine_indicators = ['ml', '750', 'cabernet', 'merlot', 'sauvignon', 'wine']
             if any(indicator in desc_lower for indicator in wine_indicators):
                 belongs_to_selected = False
-                match_confidence = "High"  # High confidence it's NOT chips
-                
-                if idx < 5:
-                    found_wine_terms = [ind for ind in wine_indicators if ind in desc_lower]
-                    log_event("INFO", f"Row {idx + 1} WINE CONFLICT", 
-                              wine_terms_found=found_wine_terms,
-                              description=description[:50])
         
-        # Secondary check: use categories if description is unclear or vague
-        if not belongs_to_selected and (len(desc_lower.split()) < 4 or any(vague in desc_lower for vague in ['assorted', 'variety', 'misc'])):
-            for product_type in product_types_to_match:
-                if len(product_type) > 2 and product_type in category_text:
-                    belongs_to_selected = True
-                    match_confidence = "Medium"
-                    matching_terms.append(product_type)
-                    break
-        
-        # Mark as correct if product belongs to selected brand's portfolio
+        # Mark as correct or incorrect
         if belongs_to_selected:
             df.at[idx, "Correct Brand?"] = "Y"
-            df.at[idx, "Match Strength"] = match_confidence
-            df.at[idx, "Suggested Brand"] = ""  # Clear suggestion for Y items
+            df.at[idx, "Match Strength"] = "High"
+            df.at[idx, "Suggested Brand"] = ""
             continue
         
-        # Step 2: Product doesn't belong to selected brand - suggest appropriate brand
+        # Product doesn't belong - suggest different brand
         df.at[idx, "Correct Brand?"] = "N"
         
-        # CRITICAL: Never suggest the selected brand for N items
-        suggested_brand = None
+        # Try to extract brand from description
+        suggested_brand = extract_brand_from_description(description, master_brands)
         
-        # Try to extract brand from description (but exclude selected brand)
-        potential_brand = extract_brand_from_description_universal(description, desc_lower, master_brands)
-        if potential_brand and potential_brand.lower() != selected_brand_lower:
-            suggested_brand = potential_brand
+        # Never suggest the same brand for N items
+        if suggested_brand and suggested_brand.lower() == selected_brand_lower:
+            suggested_brand = None
         
+        # Final fallback
         if not suggested_brand:
-            # Try category-based suggestions (exclude selected brand)
-            potential_brand = suggest_brand_from_categories_universal(category_text, brand_df)
-            if potential_brand and potential_brand.lower() != selected_brand_lower:
-                suggested_brand = potential_brand
-        
-        if not suggested_brand:
-            # Try product-type based suggestions (exclude selected brand)
-            potential_brand = suggest_brand_from_product_type_universal(desc_lower, brand_df)
-            if potential_brand and potential_brand.lower() != selected_brand_lower:
-                suggested_brand = potential_brand
-        
-        if not suggested_brand:
-            # Final fallback - mark for UPC lookup or extract potential brand
-            barcode = safe_str(row.get("BARCODE", ""))
-            if barcode and barcode.isdigit() and len(barcode) >= 8:
-                suggested_brand = "UPC Lookup Required"
-                match_confidence = "UPC"
+            if any(wine_ind in desc_lower for wine_ind in ['ml', '750', 'wine', 'cabernet']):
+                suggested_brand = "Wine Brand (Review Required)"
             else:
-                # Extract potential brand from description as last resort
-                potential_brand = extract_potential_new_brand_universal(description)
-                if potential_brand and not potential_brand.lower().startswith(selected_brand_lower):
-                    suggested_brand = potential_brand
-        
-        # Final safety check - never suggest the selected brand for N items
-        if not suggested_brand or suggested_brand.lower() == selected_brand_lower:
-            suggested_brand = "Unknown Brand - Requires Review"
+                suggested_brand = "Unknown Brand"
         
         df.at[idx, "Suggested Brand"] = suggested_brand
         df.at[idx, "Match Strength"] = "Low"
@@ -497,8 +361,7 @@ def brand_accuracy_cleanup(
             log_event("INFO", "Brand correction needed",
                       fido=safe_str(row.get("FIDO")),
                       description=description[:100],
-                      suggested_brand=suggested_brand,
-                      matching_terms=", ".join(matching_terms) if matching_terms else "None")
+                      suggested_brand=suggested_brand)
             changes_logged += 1
     
     progress_bar.progress(1.0)
@@ -513,166 +376,6 @@ def brand_accuracy_cleanup(
               total_rows=len(df))
     
     return df
-
-def extract_brand_from_description_universal(description: str, desc_lower: str, master_brands: set) -> Optional[str]:
-    """Universal brand extraction that works for any brand"""
-    
-    # Universal brand pattern detection based on product type
-    product_brand_patterns = {
-        # Wine patterns
-        ('wine', 'ml', '750', 'vintage', 'cabernet', 'merlot', 'sauvignon'): [
-            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:cabernet|merlot|sauvignon|wine|vintage|\d+\s*ml))',
-            r'\b([A-Z][a-zA-Z]+)\s+(?:cabernet|merlot|sauvignon|wine)',
-        ],
-        # Fitness patterns  
-        ('fitness', 'workout', 'exercise', 'belt'): [
-            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:fitness|workout|exercise|belt))',
-        ],
-        # Food/snack patterns
-        ('chips', 'snacks', 'crackers', 'cookies'): [
-            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:chips|snacks|crackers|cookies))',
-        ],
-        # Oil patterns
-        ('oil', 'olive'): [
-            r'\b([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*?)(?=\s+(?:oil|olive))',
-        ]
-    }
-    
-    # Try pattern matching based on product type in description
-    for indicators, patterns in product_brand_patterns.items():
-        if any(indicator in desc_lower for indicator in indicators):
-            for pattern in patterns:
-                match = re.search(pattern, description, re.IGNORECASE)
-                if match:
-                    potential_brand = match.group(1).strip()
-                    potential_lower = potential_brand.lower()
-                    
-                    # Check if exact match in master brands
-                    if potential_lower in master_brands:
-                        return potential_brand.title()
-                    
-                    # Check for partial matches
-                    for master_brand in master_brands:
-                        if potential_lower in master_brand or master_brand in potential_lower:
-                            return master_brand.title()
-    
-    # Look for any master brand that appears in the description
-    best_brand = None
-    best_length = 0
-    
-    for brand in master_brands:
-        if len(brand) > 3 and brand in desc_lower:
-            # Check for whole word match to avoid false positives
-            pattern = r'\b' + re.escape(brand) + r'\b'
-            if re.search(pattern, desc_lower) and len(brand) > best_length:
-                best_brand = brand
-                best_length = len(brand)
-    
-    if best_brand:
-        return best_brand.title()
-    
-    # Look for brand patterns (capitalized words near start of description)
-    words = description.split()
-    for i, word in enumerate(words[:5]):  # Check first 5 words
-        if word and word[0].isupper() and len(word) > 2:
-            # Check if this might be a brand (not a common word)
-            if word.lower() not in {'premium', 'natural', 'organic', 'fresh', 'new', 'improved'}:
-                # Check if followed by another capitalized word
-                if i < len(words) - 1 and words[i + 1] and words[i + 1][0].isupper():
-                    potential_brand = f"{word} {words[i + 1]}"
-                    # Check if it's in master brands
-                    if potential_brand.lower() in master_brands:
-                        return potential_brand
-                elif word.lower() in master_brands:
-                    return word
-    
-    return None
-
-def suggest_brand_from_categories_universal(category_text: str, brand_df: Optional[pd.DataFrame]) -> Optional[str]:
-    """Universal category-based brand suggestion using master brand file"""
-    
-    if brand_df is None:
-        return None
-    
-    # Extract meaningful category terms
-    category_words = [word for word in category_text.split() if len(word) > 3]
-    
-    # Look for brands that might match these categories
-    for _, brand_row in brand_df.iterrows():
-        allowed_types = safe_str(brand_row.get("ALLOWED_PRODUCT_TYPES", "")).lower()
-        brand_name = safe_str(brand_row.get("BRAND", ""))
-        
-        if allowed_types:
-            # Check if any category words match the allowed product types
-            for category_word in category_words:
-                if category_word in allowed_types:
-                    return brand_name
-    
-    return None
-
-def suggest_brand_from_product_type_universal(desc_lower: str, brand_df: Optional[pd.DataFrame]) -> Optional[str]:
-    """Universal product-type matching using the brand master file"""
-    
-    if brand_df is None:
-        return None
-    
-    # Extract key product indicators from description
-    product_indicators = []
-    common_products = ['wine', 'pasta', 'chips', 'protein', 'cookies', 'oil', 'fitness', 'tile', 'supplement']
-    
-    for product in common_products:
-        if product in desc_lower:
-            product_indicators.append(product)
-    
-    # Find brands that sell these product types
-    for _, brand_row in brand_df.iterrows():
-        allowed_types = safe_str(brand_row.get("ALLOWED_PRODUCT_TYPES", "")).lower()
-        brand_name = safe_str(brand_row.get("BRAND", ""))
-        
-        if allowed_types and product_indicators:
-            # Check if any product indicators match this brand's allowed types
-            for indicator in product_indicators:
-                if indicator in allowed_types:
-                    return brand_name
-    
-    return None
-
-def extract_potential_new_brand_universal(description: str) -> Optional[str]:
-    """Universal brand extraction for potential new brands"""
-    
-    # Look for patterns that suggest brand names
-    words = description.split()
-    
-    # Common brand patterns:
-    # 1. First 1-2 capitalized words
-    # 2. Words followed by product indicators
-    # 3. Possessive patterns (Brand's Product)
-    
-    potential_brands = []
-    
-    # Pattern 1: First few capitalized words
-    for i, word in enumerate(words[:3]):
-        if word and len(word) > 2 and word[0].isupper():
-            if word.lower() not in {'premium', 'natural', 'organic', 'fresh', 'new', 'improved', 'best', 'great'}:
-                if i < len(words) - 1 and words[i + 1] and words[i + 1][0].isupper():
-                    potential_brands.append(f"{word} {words[i + 1]}")
-                else:
-                    potential_brands.append(word)
-    
-    # Pattern 2: Words before common product types
-    product_keywords = ['chips', 'wine', 'pasta', 'protein', 'cookies', 'oil', 'supplement', 'fitness']
-    for i, word in enumerate(words):
-        if word.lower() in product_keywords and i > 0:
-            prev_word = words[i - 1]
-            if prev_word and len(prev_word) > 2 and prev_word[0].isupper():
-                potential_brands.append(prev_word)
-    
-    # Return the first reasonable potential brand
-    for brand in potential_brands:
-        if len(brand) >= 3:
-            return f"{brand} (NEW)"
-    
-    return None
 
 def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
     log_event("INFO", "Starting category hierarchy cleanup", rows=len(df))
@@ -702,14 +405,6 @@ def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
             df.at[idx, "Correct Categories?"] = "Y"
         else:
             df.at[idx, "Correct Categories?"] = "N"
-            
-            # Generate suggestions
-            description = safe_str(row.get("DESCRIPTION", ""))
-            suggested_cats = suggest_category_improvements(description, current_cats)
-            
-            df.at[idx, "Suggested Category 1"] = suggested_cats[0]
-            df.at[idx, "Suggested Category 2"] = suggested_cats[1]
-            df.at[idx, "Suggested Category 3"] = suggested_cats[2]
             df.at[idx, "Match Strength"] = "Medium"
     
     progress_bar.progress(1.0)
@@ -740,15 +435,12 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
         status_text.text(f"Analyzing description for row {idx + 1} of {total_rows}")
         
         description = safe_str(row.get("DESCRIPTION", ""))
-        brand = safe_str(row.get("BRAND", ""))
         
         is_vague = bool(re.search(vague_pattern, description.lower())) or len(description.strip()) < 10
         
         df.at[idx, "Vague Description?"] = "Y" if is_vague else "N"
         
         if is_vague:
-            improved_desc = improve_description(description, brand)
-            df.at[idx, "Suggested New Description"] = improved_desc
             df.at[idx, "Match Strength"] = "Medium"
     
     progress_bar.progress(1.0)
@@ -854,7 +546,6 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
         use_container_width=True,
         help="Clear uploaded file and reset form"
     ):
-        # Clear session state
         if "_last_file_key" in st.session_state:
             del st.session_state["_last_file_key"]
         if "_raw_df" in st.session_state:
@@ -901,31 +592,6 @@ def render_results(df: pd.DataFrame):
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True
     )
-    
-    # Export NEW suggestions
-    if "Suggested Brand" in df.columns:
-        new_suggestions = df[df["Suggested Brand"].str.endswith("(NEW)", na=False)]
-        
-        if not new_suggestions.empty:
-            st.subheader("🆕 New Brand Suggestions")
-            st.write(f"Found {len(new_suggestions)} products with potential new brands:")
-            
-            display_cols = ["FIDO", "BARCODE", "DESCRIPTION", "BRAND", "MANUFACTURER", "Suggested Brand", "Match Strength"]
-            available_cols = [col for col in display_cols if col in new_suggestions.columns]
-            
-            st.dataframe(new_suggestions[available_cols], use_container_width=True)
-            
-            new_buffer = io.BytesIO()
-            with pd.ExcelWriter(new_buffer, engine='openpyxl') as writer:
-                new_suggestions[available_cols].to_excel(writer, index=False, sheet_name='New_Brand_Suggestions')
-            
-            st.download_button(
-                "📥 Download New Brand Suggestions (.xlsx)",
-                data=new_buffer.getvalue(),
-                file_name=f"taxonomy_guardian_new_brands_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
-            )
 
 def render_logs():
     with st.expander("📋 Application Logs", expanded=False):
@@ -1071,19 +737,6 @@ def main():
         error_msg = f"Error during {cleanup_type.lower()}: {str(e)}"
         st.error(f"❌ {error_msg}")
         log_event("ERROR", error_msg)
-        
-        with st.expander("🔧 Troubleshooting Tips", expanded=True):
-            st.markdown("""
-            **Common issues and solutions:**
-            
-            1. **File format errors**: Ensure your file is a valid Excel (.xlsx) or CSV format
-            2. **Memory errors**: Try processing smaller batches of data (< 10,000 rows)
-            3. **Network timeouts**: This is normal and expected for some operations
-            4. **Missing reference data**: Ensure the brand-manufacturer reference file is uploaded
-            5. **Column mapping**: Check that your data has the required column structure
-            
-            **If issues persist:** Check the application logs below for detailed error information.
-            """)
     
     render_logs()
 
