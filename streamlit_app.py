@@ -535,6 +535,59 @@ def smart_pattern_match(description: str, allowed_types: List[str]) -> Tuple[boo
                         return True, 0.80, product_type
     
     return False, 0.0, ""
+    """
+    Improved pattern matching with plural/singular handling
+    Returns: (match_found, confidence, matched_type)
+    """
+    if not allowed_types:
+        return False, 0.0, ""
+    
+    desc_lower = description.lower()
+    
+    for product_type in allowed_types:
+        pt_lower = product_type.lower().strip()
+        
+        # Direct match - highest confidence
+        if pt_lower in desc_lower:
+            return True, 0.95, product_type
+        
+        # Handle plural/singular variations
+        # Remove trailing 's' and check
+        if pt_lower.endswith('s'):
+            singular = pt_lower[:-1]
+            if singular in desc_lower:
+                return True, 0.90, product_type
+        else:
+            plural = pt_lower + 's'
+            if plural in desc_lower:
+                return True, 0.90, product_type
+        
+        # Check if all words from product_type appear in description
+        words = pt_lower.split()
+        if len(words) > 1:
+            all_words_present = all(word in desc_lower for word in words)
+            if all_words_present:
+                return True, 0.85, product_type
+        
+        # Check for common variations
+        variations = {
+            'chip': ['chips', 'chip', 'crisps'],
+            'drink': ['drinks', 'drink', 'beverage', 'beverages'],
+            'snack': ['snacks', 'snack'],
+            'powder': ['powder', 'powders'],
+            'supplement': ['supplement', 'supplements'],
+            'energy': ['energy', 'energizing'],
+            'protein': ['protein', 'proteins']
+        }
+        
+        # Check if any key word has variations in description
+        for base_word, var_list in variations.items():
+            if base_word in pt_lower:
+                for variant in var_list:
+                    if variant in desc_lower:
+                        return True, 0.80, product_type
+    
+    return False, 0.0, ""
     """Extract brand from description"""
     desc_lower = description.lower()
     
