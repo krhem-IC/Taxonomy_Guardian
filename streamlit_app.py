@@ -401,48 +401,73 @@ def extract_brand_from_description(description: str, master_brands: set) -> Opti
     
     return None
 
-def smart_pattern_match(description: str, allowed_types: List[str]) -> Tuple[bool, float, str]:
+def smart_pattern_match(description: str, allowed_types: List[str], categories: List[str] = None) -> Tuple[bool, float, str]:
+    """
+    Improved pattern matching with category validation
+    Returns: (match_found, confidence, matched_type)
+    """
     if not allowed_types:
         return False, 0.0, ""
     
     desc_lower = description.lower()
     
+    # Extract category keywords if provided
+    category_text = ""
+    if categories:
+        category_text = " ".join([c.lower() for c in categories if c]).strip()
+    
     for product_type in allowed_types:
         pt_lower = product_type.lower().strip()
         
+        # Direct match in description
         if pt_lower in desc_lower:
-            return True, 0.95, product_type
+            # If we have category info, validate it matches
+            if category_text:
+                # Check if product type or related terms appear in categories
+                type_words = pt_lower.split()
+                category_match = any(word in category_text for word in type_words if len(word) > 3)
+                if category_match:
+                    return True, 0.95, product_type
+                else:
+                    # Type in description but not in categories - lower confidence
+                    return True, 0.70, product_type
+            return True, 0.90, product_type
         
+        # Handle plural/singular variations
         if pt_lower.endswith('s'):
             singular = pt_lower[:-1]
             if singular in desc_lower:
-                return True, 0.90, product_type
+                return True, 0.85, product_type
         else:
             plural = pt_lower + 's'
             if plural in desc_lower:
-                return True, 0.90, product_type
+                return True, 0.85, product_type
         
+        # Check if all words from product_type appear
         words = pt_lower.split()
         if len(words) > 1:
             all_words_present = all(word in desc_lower for word in words)
             if all_words_present:
-                return True, 0.85, product_type
+                return True, 0.80, product_type
         
+        # Check for common variations
         variations = {
-            'chip': ['chips', 'chip', 'crisps'],
+            'chip': ['chips', 'chip', 'crisps', 'crisp'],
             'drink': ['drinks', 'drink', 'beverage', 'beverages'],
             'snack': ['snacks', 'snack'],
             'powder': ['powder', 'powders'],
             'supplement': ['supplement', 'supplements'],
             'energy': ['energy', 'energizing'],
-            'protein': ['protein', 'proteins']
+            'protein': ['protein', 'proteins'],
+            'wine': ['wine', 'wines', 'vino'],
+            'beer': ['beer', 'beers', 'ale', 'lager']
         }
         
         for base_word, var_list in variations.items():
             if base_word in pt_lower:
                 for variant in var_list:
                     if variant in desc_lower:
-                        return True, 0.80, product_type
+                        return True, 0.75, product_type
     
     return False, 0.0, ""
 
@@ -498,7 +523,15 @@ def brand_accuracy_cleanup(
             
             description = safe_str(row.get("DESCRIPTION", ""))
             
-            match_found, confidence, matched_type = smart_pattern_match(description, allowed_types)
+            # Get category information for validation
+            categories = [
+                safe_str(row.get("CATEGORY_1", "")),
+                safe_str(row.get("CATEGORY_2", "")),
+                safe_str(row.get("CATEGORY_3", ""))
+            ]
+            
+            # Try smart pattern matching with category validation
+            match_found, confidence, matched_type = smart_pattern_match(description, allowed_types, categories)
             
             if match_found and confidence >= 0.85:
                 df.at[idx, "Correct Brand?"] = "Y"
@@ -511,8 +544,16 @@ def brand_accuracy_cleanup(
                 uncertain_indices.append(idx)
                 df.at[idx, "Match Strength"] = "Uncertain"
             else:
+                # Mark as incorrect and suggest alternative brand
                 df.at[idx, "Correct Brand?"] = "N"
                 df.at[idx, "Match Strength"] = "Low"
+                
+                # Always try to suggest alternative brand (even without AI)
+                suggested_brand = extract_brand_from_description(description, master_brands)
+                if suggested_brand and suggested_brand.lower() != selected_brand_lower:
+                    df.at[idx, "Suggested Brand"] = suggested_brand
+                elif not suggested_brand:
+                    df.at[idx, "Suggested Brand"] = "Unknown Brand"
         
         # Pass 2: LLM verification
         if use_llm and uncertain_indices:
