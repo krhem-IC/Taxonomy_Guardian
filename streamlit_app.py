@@ -1,5 +1,5 @@
 # streamlit_app.py
-# Taxonomy Guardian - Fixed version
+# Taxonomy Guardian v12 - Complete syntax-validated version
 
 import io
 import re
@@ -125,14 +125,11 @@ def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
         log_event("INFO", f"Removed {removed_count} empty unnamed columns")
     
     # Step 2: Check for and remove metadata columns
-    # Metadata columns typically have single value in first cell and rest empty
     columns_to_remove = []
     for col in df.columns:
-        # Check if this column has only 1 non-null value
         non_null_count = df[col].notna().sum()
         
         if non_null_count == 1:
-            # Check if the single value contains metadata keywords
             first_val = str(df[col].iloc[0]).lower() if pd.notna(df[col].iloc[0]) else ""
             metadata_keywords = ["query", "fetch", "export", "report", "extract"]
             
@@ -140,7 +137,6 @@ def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
                 columns_to_remove.append(col)
                 log_event("INFO", f"Identified metadata column to remove: {col} = '{first_val[:50]}'")
     
-    # Remove metadata columns
     if columns_to_remove:
         df = df.drop(columns=columns_to_remove)
         log_event("INFO", f"Removed {len(columns_to_remove)} metadata columns")
@@ -153,14 +149,11 @@ def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
               total_columns=len(df.columns))
     
     # Step 4: Detect and handle duplicate header rows
-    # If the first data row looks like it contains column names, remove it
     if len(df) > 0:
         first_row = df.iloc[0]
-        # Check if first row values match expected column names
         expected_headers = ["FIDO", "BARCODE", "CATEGORY_HIERARCHY", "DESCRIPTION", "BRAND"]
         first_row_values = [str(val).strip().upper() for val in first_row if pd.notna(val)]
         
-        # If 3+ expected headers appear in first row, it's likely a duplicate header
         matches = sum(1 for header in expected_headers if header in first_row_values)
         if matches >= 3:
             log_event("WARNING", "Detected duplicate header row in data, removing it",
@@ -173,9 +166,8 @@ def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
             df[col] = ""
             log_event("INFO", f"Added missing column: {col}")
     
-    # Step 6: Final validation - check if we have actual data
+    # Step 6: Final validation
     if len(df) > 0:
-        # Check if first row has data in key columns
         key_columns = ["FIDO", "DESCRIPTION", "BRAND"]
         has_data = False
         sample_values = {}
@@ -190,7 +182,7 @@ def normalize_column_headers(df: pd.DataFrame) -> pd.DataFrame:
         if has_data:
             log_event("INFO", "Data validation passed", sample_values=sample_values)
         else:
-            log_event("ERROR", "First data row appears invalid - all key columns empty or contain header names",
+            log_event("ERROR", "First data row appears invalid",
                      sample_values=sample_values)
     
     return df
@@ -210,14 +202,10 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
 # =========================
 
 def detect_header_row(file_bytes: bytes, file_name: str) -> int:
-    """
-    Intelligently detect which row contains the actual headers.
-    Returns 0 or 1 to indicate header row index.
-    """
+    """Intelligently detect which row contains the actual headers"""
     from io import BytesIO
     
     try:
-        # Read first 3 rows without treating any as headers
         df_peek = pd.read_excel(BytesIO(file_bytes), header=None, nrows=3)
         
         if df_peek.empty or len(df_peek) < 1:
@@ -225,31 +213,23 @@ def detect_header_row(file_bytes: bytes, file_name: str) -> int:
             return 0
         
         first_row = df_peek.iloc[0]
-        
-        # Count non-empty cells in first row
         non_empty_count = first_row.notna().sum()
         total_cells = len(first_row)
-        
-        # Get first cell value (if exists)
         first_cell = str(first_row.iloc[0]).lower() if pd.notna(first_row.iloc[0]) else ""
         
-        # Check for metadata keywords
         metadata_keywords = ["query", "fetch", "export", "report", "extract"]
         has_metadata_keyword = any(keyword in first_cell for keyword in metadata_keywords)
         
         # SCENARIO 1: Metadata row detected
-        # If first row has very few filled cells (≤2) and contains metadata keywords
         if non_empty_count <= 2 and has_metadata_keyword:
             log_event("INFO", "Detected metadata row in Row 0", 
                      first_cell=first_cell,
                      non_empty_count=non_empty_count,
                      scenario="Snowflake export with metadata")
-            return 1  # Use Row 1 as headers (skip Row 0)
+            return 1
         
         # SCENARIO 2: Check if Row 0 looks like actual headers
-        # Headers typically have short, descriptive names and many filled cells
-        if non_empty_count >= 5:  # At least 5 columns filled
-            # Check if values look like column names (contain expected header keywords)
+        if non_empty_count >= 5:
             header_keywords = ["fido", "barcode", "category", "description", "brand", "manufacturer"]
             row_text = " ".join([str(cell).lower() for cell in first_row if pd.notna(cell)])
             looks_like_headers = any(keyword in row_text for keyword in header_keywords)
@@ -258,9 +238,8 @@ def detect_header_row(file_bytes: bytes, file_name: str) -> int:
                 log_event("INFO", "Detected headers in Row 0",
                          non_empty_count=non_empty_count,
                          scenario="Clean file with headers in Row 0")
-                return 0  # Use Row 0 as headers
+                return 0
         
-        # Default: Use Row 0 as headers
         log_event("INFO", "Using Row 0 as headers (default behavior)",
                  non_empty_count=non_empty_count)
         return 0
@@ -271,14 +250,11 @@ def detect_header_row(file_bytes: bytes, file_name: str) -> int:
 
 @st.cache_data(show_spinner=False)
 def read_excel_file(file_path_or_buffer) -> Optional[pd.DataFrame]:
-    """Read Excel file for brand reference (simpler, always expects clean format)"""
+    """Read Excel file for brand reference"""
     try:
         df = pd.read_excel(file_path_or_buffer)
-        
-        # Normalize column names
         df.columns = [str(col).strip().upper() for col in df.columns]
         
-        # Convert specific columns to string and clean them
         string_columns = ["BRAND", "MANUFACTURER", "WEBSITE", "ALLOWED_PRODUCT_TYPES"]
         for col in string_columns:
             if col in df.columns:
@@ -291,14 +267,13 @@ def read_excel_file(file_path_or_buffer) -> Optional[pd.DataFrame]:
         return None
 
 def read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
-    """Read user uploaded file with smart header detection - ENHANCED"""
+    """Read user uploaded file with smart header detection"""
     from io import BytesIO, StringIO
     
     try:
         file_name_lower = file_name.lower()
         
         if file_name_lower.endswith('.csv'):
-            # Try UTF-8 first, then fallback to latin-1
             try:
                 content = file_bytes.decode('utf-8')
             except UnicodeDecodeError:
@@ -307,12 +282,8 @@ def read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
             
             df = pd.read_csv(StringIO(content))
         else:
-            # Smart header detection for Excel files
             header_row = detect_header_row(file_bytes, file_name)
-            
-            # Read with detected header row
             df = pd.read_excel(BytesIO(file_bytes), header=header_row)
-            
             log_event("INFO", f"Read Excel file with header at row {header_row}")
         
         log_event("INFO", f"Successfully loaded file: {file_name}", 
@@ -324,7 +295,7 @@ def read_user_file(file_name: str, file_bytes: bytes) -> pd.DataFrame:
         raise Exception(f"Could not read file '{file_name}': {str(e)}")
 
 # =========================
-# Brand Reference Functions - FIXED
+# Brand Reference Functions
 # =========================
 def load_brand_reference(show_upload: bool = True) -> Optional[pd.DataFrame]:
     brand_df = read_excel_file("All_Brands_Manufacturers.xlsx")
@@ -352,7 +323,6 @@ def get_manufacturer_brand_lists(brand_df: pd.DataFrame) -> Tuple[List[str], Dic
     if brand_df is None or brand_df.empty:
         return [], {}
     
-    # Ensure we have the required columns
     if "MANUFACTURER" not in brand_df.columns or "BRAND" not in brand_df.columns:
         log_event("ERROR", "Brand reference file missing required columns")
         return [], {}
@@ -396,7 +366,6 @@ def extract_brand_from_description(description: str, master_brands: set) -> Opti
     """Extract brand from description"""
     desc_lower = description.lower()
     
-    # Look for any master brand that appears in the description
     best_brand = None
     best_length = 0
     
@@ -429,7 +398,7 @@ def detect_product_family(description: str) -> Optional[str]:
     return None
 
 # =========================
-# Main Cleanup Functions - FIXED
+# Main Cleanup Functions
 # =========================
 def brand_accuracy_cleanup(
     df: pd.DataFrame,
@@ -449,26 +418,21 @@ def brand_accuracy_cleanup(
               brand=selected_brand, 
               rows=len(df))
     
-    # Work on the dataframe directly to reduce memory usage
     ensure_output_columns(df)
     
-    # Create progress bar and status text
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        # Get brand information
         master_brands = get_master_brand_set(brand_df)
         allowed_types = get_allowed_product_types(brand_df, selected_brand)
         selected_brand_lower = selected_brand.lower()
         
-        # Debug logging
         log_event("INFO", "Brand matching setup", 
                   selected_brand=selected_brand,
                   allowed_types=allowed_types,
                   master_brands_count=len(master_brands))
         
-        # Initialize columns
         df["Correct Brand?"] = "N"
         df["Suggested Brand"] = ""
         df["Match Strength"] = ""
@@ -477,7 +441,6 @@ def brand_accuracy_cleanup(
         total_rows = len(df)
         
         for idx, row in df.iterrows():
-            # Update progress every 100 rows to improve performance
             if idx % 100 == 0 or idx == total_rows - 1:
                 progress = (idx + 1) / total_rows
                 progress_bar.progress(progress)
@@ -486,23 +449,19 @@ def brand_accuracy_cleanup(
             description = safe_str(row.get("DESCRIPTION", ""))
             desc_lower = description.lower()
             
-            # Debug logging for first few rows
             if idx < 3:
                 log_event("INFO", f"Row {idx + 1} debug", 
                           description=description[:100],
                           description_length=len(description))
             
-            # Check if description contains any allowed product type
             belongs_to_selected = False
             for product_type in allowed_types:
                 pt_lower = product_type.lower().strip()
                 
-                # Direct match
                 if pt_lower in desc_lower:
                     belongs_to_selected = True
                     break
                 
-                # Add variations for common patterns
                 if pt_lower == "chips":
                     if any(term in desc_lower for term in ["chip", "chips", "crisps"]):
                         belongs_to_selected = True
@@ -520,30 +479,24 @@ def brand_accuracy_cleanup(
                         belongs_to_selected = True
                         break
             
-            # Check for wine conflicts (specific to chips brands)
             if belongs_to_selected and any('chip' in pt.lower() for pt in allowed_types):
                 wine_indicators = ['ml', '750', 'cabernet', 'merlot', 'sauvignon', 'wine']
                 if any(indicator in desc_lower for indicator in wine_indicators):
                     belongs_to_selected = False
             
-            # Mark as correct or incorrect
             if belongs_to_selected:
                 df.at[idx, "Correct Brand?"] = "Y"
                 df.at[idx, "Match Strength"] = "High"
                 df.at[idx, "Suggested Brand"] = ""
                 continue
             
-            # Product doesn't belong - suggest different brand
             df.at[idx, "Correct Brand?"] = "N"
             
-            # Try to extract brand from description
             suggested_brand = extract_brand_from_description(description, master_brands)
             
-            # Never suggest the same brand for N items
             if suggested_brand and suggested_brand.lower() == selected_brand_lower:
                 suggested_brand = None
             
-            # Final fallback for wine products
             if not suggested_brand:
                 if any(wine_ind in desc_lower for wine_ind in ['ml', '750', 'wine', 'cabernet']):
                     if 'terra valentine' in desc_lower or 'valentine' in desc_lower:
@@ -560,7 +513,6 @@ def brand_accuracy_cleanup(
             df.at[idx, "Suggested Brand"] = suggested_brand
             df.at[idx, "Match Strength"] = "Low"
             
-            # Log changes (limited to prevent memory issues)
             if log_changes_only and changes_logged < max_logs:
                 log_event("INFO", "Brand correction needed",
                           fido=safe_str(row.get("FIDO")),
@@ -582,7 +534,6 @@ def brand_accuracy_cleanup(
         log_event("ERROR", f"Brand cleanup error: {str(e)}")
         raise e
     finally:
-        # Always clean up UI elements, even if there's an error
         progress_bar.empty()
         status_text.empty()
 
@@ -598,7 +549,6 @@ def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
         total_rows = len(df)
         
         for idx, row in df.iterrows():
-            # Update progress every 100 rows
             if idx % 100 == 0 or idx == total_rows - 1:
                 progress = (idx + 1) / total_rows
                 progress_bar.progress(progress)
@@ -630,7 +580,6 @@ def category_hierarchy_cleanup(df: pd.DataFrame) -> pd.DataFrame:
         log_event("ERROR", f"Category cleanup error: {str(e)}")
         raise e
     finally:
-        # Always clean up UI elements, even if there's an error
         progress_bar.empty()
         status_text.empty()
 
@@ -647,7 +596,6 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
         vague_pattern = r'\b(' + '|'.join(re.escape(term) for term in VAGUE_TERMS) + r')\b'
         
         for idx, row in df.iterrows():
-            # Update progress every 100 rows
             if idx % 100 == 0 or idx == total_rows - 1:
                 progress = (idx + 1) / total_rows
                 progress_bar.progress(progress)
@@ -673,12 +621,11 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
         log_event("ERROR", f"Description cleanup error: {str(e)}")
         raise e
     finally:
-        # Always clean up UI elements, even if there's an error
         progress_bar.empty()
         status_text.empty()
 
 # =========================
-# UI Functions - FIXED
+# UI Functions
 # =========================
 def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     st.sidebar.header("📁 File Upload")
@@ -693,7 +640,6 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     if uploaded_file is not None:
         try:
             file_bytes = uploaded_file.getvalue()
-            # Use file name and size for caching key (more reliable than hash)
             file_key = f"{uploaded_file.name}:{len(file_bytes)}"
             
             if st.session_state.get("_last_file_key") != file_key:
@@ -775,7 +721,6 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
         type="primary"
     )
     
-    # Add clear form button
     clear_form = st.sidebar.button(
         "🗑️ Clear Form", 
         use_container_width=True,
@@ -783,7 +728,6 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     )
     
     if clear_form:
-        # Clear session state
         keys_to_clear = ["_last_file_key", "_raw_df"]
         for key in keys_to_clear:
             if key in st.session_state:
@@ -816,13 +760,11 @@ def render_results(df: pd.DataFrame):
             suggestions = len(df[df["Suggested Brand"] != ""])
             st.metric("Suggestions Made", f"{suggestions:,}")
     
-    # Show first 100 rows
     st.dataframe(df.head(100), use_container_width=True)
     
     if len(df) > 100:
         st.info(f"Showing first 100 rows of {len(df):,} total rows. Download the full file to see all data.")
     
-    # Download functionality
     try:
         output_buffer = io.BytesIO()
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
@@ -844,7 +786,7 @@ def render_logs():
         logs = st.session_state.get("logs", [])
         
         if logs:
-            recent_logs = logs[-50:]  # Show last 50 logs
+            recent_logs = logs[-50:]
             
             for log_entry in reversed(recent_logs):
                 timestamp = log_entry.get("timestamp", "")
@@ -873,7 +815,7 @@ def render_logs():
             st.rerun()
 
 # =========================
-# Main Application - FIXED
+# Main Application
 # =========================
 def main():
     try:
@@ -902,3 +844,125 @@ def main():
                 
                 **Step 5:** Review results and download the cleaned file
                 """)
+            
+            render_logs()
+            return
+        
+        if raw_df is None:
+            st.error("❌ Failed to load the uploaded file.")
+            render_logs()
+            return
+        
+        st.success(f"✅ File loaded: **{uploaded_file.name}**")
+        
+        file_col1, file_col2 = st.columns(2)
+        with file_col1:
+            st.metric("Rows", f"{len(raw_df):,}")
+        with file_col2:
+            st.metric("Columns", len(raw_df.columns))
+        
+        try:
+            processed_df = normalize_column_headers(raw_df)
+            
+            if processed_df.empty:
+                st.error("❌ File appears to be empty after processing.")
+                render_logs()
+                return
+            
+            missing_columns = [col for col in REQUIRED_COLUMNS if col not in processed_df.columns]
+            
+            if missing_columns:
+                st.warning(f"⚠️ Missing required columns (added as empty): {', '.join(missing_columns)}")
+            else:
+                st.success("✅ All required columns are present")
+            
+            key_columns = ["FIDO", "DESCRIPTION", "BRAND"]
+            data_check = {}
+            for col in key_columns:
+                if col in processed_df.columns:
+                    non_empty = processed_df[col].notna().sum()
+                    data_check[col] = non_empty
+            
+            total_rows = len(processed_df)
+            if data_check:
+                col1_check, col2_check, col3_check = st.columns(3)
+                with col1_check:
+                    fido_count = data_check.get("FIDO", 0)
+                    st.metric("FIDO values", f"{fido_count}/{total_rows}")
+                with col2_check:
+                    desc_count = data_check.get("DESCRIPTION", 0)
+                    st.metric("Description values", f"{desc_count}/{total_rows}")
+                with col3_check:
+                    brand_count = data_check.get("BRAND", 0)
+                    st.metric("Brand values", f"{brand_count}/{total_rows}")
+                
+                if any(count < total_rows * 0.5 for count in data_check.values()):
+                    st.warning("⚠️ Some columns have significant missing data. Please check the logs for details.")
+        
+        except Exception as e:
+            st.error(f"❌ Error processing file: {str(e)}")
+            log_event("ERROR", f"File processing error: {str(e)}")
+            render_logs()
+            return
+        
+        st.subheader(f"🔧 Selected Cleanup: {cleanup_type}")
+        
+        if cleanup_type == "Brand Accuracy":
+            if not selected_manufacturer or not selected_brand:
+                st.warning("⚠️ Please select both manufacturer and brand in the sidebar")
+                render_logs()
+                return
+            else:
+                st.success(f"🎯 Target: **{selected_manufacturer}** → **{selected_brand}**")
+        
+        if not run_cleanup:
+            st.info("👆 Click **Run Cleanup** in the sidebar to process your data")
+            render_logs()
+            return
+        
+        try:
+            log_event("INFO", f"Starting {cleanup_type} cleanup", 
+                      rows=len(processed_df),
+                      cleanup_type=cleanup_type)
+            
+            with st.spinner(f"🔄 Running {cleanup_type.lower()}..."):
+                
+                if cleanup_type == "Brand Accuracy":
+                    cleaned_df = brand_accuracy_cleanup(
+                        processed_df, 
+                        brand_df, 
+                        selected_manufacturer, 
+                        selected_brand,
+                        log_changes_only, 
+                        max_logs
+                    )
+                
+                elif cleanup_type == "Category Hierarchy Cleanup":
+                    cleaned_df = category_hierarchy_cleanup(processed_df)
+                
+                elif cleanup_type == "Vague Description Cleanup":
+                    cleaned_df = vague_description_cleanup(processed_df)
+                
+                else:
+                    st.error("❌ Unknown cleanup type selected")
+                    return
+            
+            st.success("✅ Cleanup completed successfully!")
+            log_event("SUCCESS", f"{cleanup_type} cleanup completed successfully")
+            
+            render_results(cleaned_df)
+        
+        except Exception as e:
+            error_msg = f"Error during {cleanup_type.lower()}: {str(e)}"
+            st.error(f"❌ {error_msg}")
+            log_event("ERROR", error_msg)
+        
+        render_logs()
+    
+    except Exception as e:
+        st.error(f"❌ Application error: {str(e)}")
+        log_event("ERROR", f"Application error: {str(e)}")
+        render_logs()
+
+if __name__ == "__main__":
+    main()
