@@ -899,3 +899,6 @@ def main():
                 **Step 3:** For Brand Accuracy, select your target manufacturer and brand
                 
                 **Step 4:** Click "Run Cleanup" to process your data
+                
+                **Step 5:** Review results and download the cleaned file
+                """)
