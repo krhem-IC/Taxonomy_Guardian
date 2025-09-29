@@ -360,9 +360,181 @@ def get_allowed_product_types(brand_df: pd.DataFrame, brand_name: str) -> List[s
     return [t.strip().lower() for t in allowed_types_raw.split(",") if t.strip()]
 
 # =========================
+# OpenAI Integration Functions
+# =========================
+def get_openai_client():
+    """Get OpenAI client with API key from secrets"""
+    try:
+        from openai import OpenAI
+        api_key = st.secrets.get("OPENAI_API_KEY")
+        if not api_key:
+            log_event("ERROR", "OpenAI API key not found in secrets")
+            return None
+        return OpenAI(api_key=api_key)
+    except ImportError:
+        log_event("ERROR", "OpenAI library not installed. Run: pip install openai")
+        return None
+    except Exception as e:
+        log_event("ERROR", f"Failed to initialize OpenAI client: {str(e)}")
+        return None
+
+def get_brand_website(brand_df: pd.DataFrame, brand_name: str) -> str:
+    """Get website URL for a specific brand"""
+    if brand_df is None or "WEBSITE" not in brand_df.columns:
+        return ""
+    
+    brand_rows = brand_df[brand_df["BRAND"].str.lower() == brand_name.lower()]
+    if brand_rows.empty:
+        return ""
+    
+    website = safe_str(brand_rows.iloc[0].get("WEBSITE", ""))
+    return website if website != "nan" else ""
+
+def check_brand_with_llm(
+    description: str, 
+    brand_name: str,
+    manufacturer: str,
+    allowed_types: List[str],
+    barcode: str = "",
+    website: str = ""
+) -> Tuple[bool, str, float]:
+    """
+    Use GPT-4o to determine if a product belongs to a brand
+    Returns: (belongs_to_brand, reasoning, confidence_score)
+    """
+    client = get_openai_client()
+    if not client:
+        return False, "OpenAI not available", 0.0
+    
+    try:
+        # Build website context only if available
+        website_context = f"- Website: {website}" if website else ""
+        
+        prompt = f"""You are a product classification expert verifying brand ownership.
+
+Product Information:
+- Description: "{description}"
+- Barcode: {barcode if barcode else "Not available"}
+
+Brand to Verify:
+- Brand: {brand_name}
+- Manufacturer: {manufacturer}
+{website_context}
+- Allowed Product Types: {', '.join(allowed_types) if allowed_types else 'Not specified'}
+
+Analyze in this order:
+1. Does the description mention "{brand_name}" or recognizable variations of the brand name?
+2. If no brand mentioned and barcode is available, does the barcode help identify this as {brand_name}?
+3. Does the product match one of the allowed product types?
+4. Is there any competing brand name mentioned in the description?
+
+Use MODERATE strictness:
+- Brand name clearly in description → High confidence YES
+- Generic description + correct product type + no competitor + helpful barcode → Acceptable YES
+- Wrong product type OR competitor brand mentioned → NO
+
+Respond in this exact format:
+BELONGS: YES or NO
+CONFIDENCE: 0.0 to 1.0
+REASONING: Brief explanation (one sentence)"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a product taxonomy expert who helps classify products accurately. Use moderate strictness when evaluating brand ownership."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=150
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        # Parse response
+        belongs = "YES" in result.split("BELONGS:")[1].split("\n")[0].upper()
+        
+        confidence_line = result.split("CONFIDENCE:")[1].split("\n")[0].strip()
+        confidence = float(confidence_line.split()[0])
+        
+        reasoning = result.split("REASONING:")[1].strip()
+        
+        log_event("INFO", f"LLM check: {brand_name}", 
+                 belongs=belongs, 
+                 confidence=confidence,
+                 reasoning=reasoning[:100])
+        
+        return belongs, reasoning, confidence
+        
+    except Exception as e:
+        log_event("ERROR", f"LLM check failed: {str(e)}")
+        return False, f"Error: {str(e)}", 0.0
+
+def estimate_llm_cost(num_products: int, model: str = "gpt-4o") -> float:
+    """Estimate cost for LLM checks"""
+    # Rough estimates per product check
+    costs_per_product = {
+        "gpt-4o": 0.005,      # ~$0.005 per product
+        "gpt-4o-mini": 0.0005  # ~$0.0005 per product
+    }
+    return num_products * costs_per_product.get(model, 0.005)
+
+# =========================
 # Brand Processing Functions
 # =========================
-def extract_brand_from_description(description: str, master_brands: set) -> Optional[str]:
+def smart_pattern_match(description: str, allowed_types: List[str]) -> Tuple[bool, float, str]:
+    """
+    Improved pattern matching with plural/singular handling
+    Returns: (match_found, confidence, matched_type)
+    """
+    if not allowed_types:
+        return False, 0.0, ""
+    
+    desc_lower = description.lower()
+    
+    for product_type in allowed_types:
+        pt_lower = product_type.lower().strip()
+        
+        # Direct match - highest confidence
+        if pt_lower in desc_lower:
+            return True, 0.95, product_type
+        
+        # Handle plural/singular variations
+        # Remove trailing 's' and check
+        if pt_lower.endswith('s'):
+            singular = pt_lower[:-1]
+            if singular in desc_lower:
+                return True, 0.90, product_type
+        else:
+            plural = pt_lower + 's'
+            if plural in desc_lower:
+                return True, 0.90, product_type
+        
+        # Check if all words from product_type appear in description
+        words = pt_lower.split()
+        if len(words) > 1:
+            all_words_present = all(word in desc_lower for word in words)
+            if all_words_present:
+                return True, 0.85, product_type
+        
+        # Check for common variations
+        variations = {
+            'chip': ['chips', 'chip', 'crisps'],
+            'drink': ['drinks', 'drink', 'beverage', 'beverages'],
+            'snack': ['snacks', 'snack'],
+            'powder': ['powder', 'powders'],
+            'supplement': ['supplement', 'supplements'],
+            'energy': ['energy', 'energizing'],
+            'protein': ['protein', 'proteins']
+        }
+        
+        # Check if any key word has variations in description
+        for base_word, var_list in variations.items():
+            if base_word in pt_lower:
+                for variant in var_list:
+                    if variant in desc_lower:
+                        return True, 0.80, product_type
+    
+    return False, 0.0, ""
     """Extract brand from description"""
     desc_lower = description.lower()
     
@@ -406,7 +578,8 @@ def brand_accuracy_cleanup(
     selected_manufacturer: str,
     selected_brand: str,
     log_changes_only: bool = True,
-    max_logs: int = 200
+    max_logs: int = 200,
+    use_llm: bool = True
 ) -> pd.DataFrame:
     
     if not selected_manufacturer or not selected_brand:
@@ -416,109 +589,107 @@ def brand_accuracy_cleanup(
     log_event("INFO", "Starting brand accuracy cleanup", 
               manufacturer=selected_manufacturer, 
               brand=selected_brand, 
-              rows=len(df))
+              rows=len(df),
+              llm_enabled=use_llm)
     
     ensure_output_columns(df)
+    
+    master_brands = get_master_brand_set(brand_df)
+    allowed_types = get_allowed_product_types(brand_df, selected_brand)
+    brand_website = get_brand_website(brand_df, selected_brand)
+    selected_brand_lower = selected_brand.lower()
+    
+    log_event("INFO", "Brand matching setup", 
+              selected_brand=selected_brand,
+              manufacturer=selected_manufacturer,
+              allowed_types=allowed_types,
+              website=brand_website if brand_website else "Not available",
+              master_brands_count=len(master_brands))
+    
+    # First pass: identify uncertain cases
+    uncertain_indices = []
     
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        master_brands = get_master_brand_set(brand_df)
-        allowed_types = get_allowed_product_types(brand_df, selected_brand)
-        selected_brand_lower = selected_brand.lower()
-        
-        log_event("INFO", "Brand matching setup", 
-                  selected_brand=selected_brand,
-                  allowed_types=allowed_types,
-                  master_brands_count=len(master_brands))
-        
         df["Correct Brand?"] = "N"
         df["Suggested Brand"] = ""
         df["Match Strength"] = ""
         
-        changes_logged = 0
         total_rows = len(df)
         
+        # Pass 1: Pattern matching
         for idx, row in df.iterrows():
             if idx % 100 == 0 or idx == total_rows - 1:
-                progress = (idx + 1) / total_rows
+                progress = (idx + 1) / (total_rows * 2)  # First half of progress
                 progress_bar.progress(progress)
-                status_text.text(f"Processing row {idx + 1} of {total_rows}")
+                status_text.text(f"Pattern matching: {idx + 1} of {total_rows}")
             
             description = safe_str(row.get("DESCRIPTION", ""))
-            desc_lower = description.lower()
             
-            if idx < 3:
-                log_event("INFO", f"Row {idx + 1} debug", 
-                          description=description[:100],
-                          description_length=len(description))
+            # Try smart pattern matching
+            match_found, confidence, matched_type = smart_pattern_match(description, allowed_types)
             
-            belongs_to_selected = False
-            for product_type in allowed_types:
-                pt_lower = product_type.lower().strip()
-                
-                if pt_lower in desc_lower:
-                    belongs_to_selected = True
-                    break
-                
-                if pt_lower == "chips":
-                    if any(term in desc_lower for term in ["chip", "chips", "crisps"]):
-                        belongs_to_selected = True
-                        break
-                elif pt_lower == "veggie chips":
-                    if any(term in desc_lower for term in ["veggie chip", "vegetable chip", "beet chip", "sweet potato chip"]):
-                        belongs_to_selected = True
-                        break
-                elif pt_lower == "snacks":
-                    if any(term in desc_lower for term in ["snack", "snacks"]):
-                        belongs_to_selected = True
-                        break
-                elif "powder" in pt_lower or "supplement" in pt_lower:
-                    if any(term in desc_lower for term in ["powder", "supplement"]):
-                        belongs_to_selected = True
-                        break
-            
-            if belongs_to_selected and any('chip' in pt.lower() for pt in allowed_types):
-                wine_indicators = ['ml', '750', 'cabernet', 'merlot', 'sauvignon', 'wine']
-                if any(indicator in desc_lower for indicator in wine_indicators):
-                    belongs_to_selected = False
-            
-            if belongs_to_selected:
+            if match_found and confidence >= 0.85:
+                # High confidence match - mark as correct, skip LLM
                 df.at[idx, "Correct Brand?"] = "Y"
                 df.at[idx, "Match Strength"] = "High"
                 df.at[idx, "Suggested Brand"] = ""
-                continue
+            elif match_found and confidence >= 0.70 and use_llm:
+                # Medium confidence - needs LLM verification
+                uncertain_indices.append(idx)
+                df.at[idx, "Match Strength"] = "Uncertain"
+            elif not match_found and use_llm:
+                # No match found - needs LLM check
+                uncertain_indices.append(idx)
+                df.at[idx, "Match Strength"] = "Uncertain"
+            else:
+                # No match and no LLM - mark as incorrect
+                df.at[idx, "Correct Brand?"] = "N"
+                df.at[idx, "Match Strength"] = "Low"
+        
+        # Show how many need AI review (no cost, just count)
+        if use_llm and uncertain_indices:
+            st.info(f"🤖 {len(uncertain_indices)} products need AI verification")
             
-            df.at[idx, "Correct Brand?"] = "N"
-            
-            suggested_brand = extract_brand_from_description(description, master_brands)
-            
-            if suggested_brand and suggested_brand.lower() == selected_brand_lower:
-                suggested_brand = None
-            
-            if not suggested_brand:
-                if any(wine_ind in desc_lower for wine_ind in ['ml', '750', 'wine', 'cabernet']):
-                    if 'terra valentine' in desc_lower or 'valentine' in desc_lower:
-                        suggested_brand = "Terra D'Oro"
-                    elif 'terra blanca' in desc_lower or 'blanca' in desc_lower:
-                        suggested_brand = "Terra Blanca"
-                    elif 'terra vega' in desc_lower or 'vega' in desc_lower:
-                        suggested_brand = "Terra Wine"
-                    else:
-                        suggested_brand = "Terra Wine"
+            # Pass 2: LLM verification for uncertain cases
+            llm_checks = 0
+            for idx in uncertain_indices:
+                progress = 0.5 + ((llm_checks + 1) / len(uncertain_indices)) * 0.5
+                progress_bar.progress(progress)
+                status_text.text(f"AI verification: {llm_checks + 1} of {len(uncertain_indices)}")
+                
+                row = df.iloc[idx]
+                description = safe_str(row.get("DESCRIPTION", ""))
+                barcode = safe_str(row.get("BARCODE", ""))
+                
+                belongs, reasoning, llm_confidence = check_brand_with_llm(
+                    description=description,
+                    brand_name=selected_brand,
+                    manufacturer=selected_manufacturer,
+                    allowed_types=allowed_types,
+                    barcode=barcode,
+                    website=brand_website
+                )
+                
+                if belongs:
+                    df.at[idx, "Correct Brand?"] = "Y"
+                    df.at[idx, "Match Strength"] = f"AI-Verified ({llm_confidence:.0%})"
                 else:
-                    suggested_brand = "Unknown Brand"
-            
-            df.at[idx, "Suggested Brand"] = suggested_brand
-            df.at[idx, "Match Strength"] = "Low"
-            
-            if log_changes_only and changes_logged < max_logs:
-                log_event("INFO", "Brand correction needed",
-                          fido=safe_str(row.get("FIDO")),
-                          description=description[:100],
-                          suggested_brand=suggested_brand)
-                changes_logged += 1
+                    df.at[idx, "Correct Brand?"] = "N"
+                    df.at[idx, "Match Strength"] = f"AI-Rejected ({llm_confidence:.0%})"
+                    
+                    # Try to suggest alternative brand
+                    suggested_brand = extract_brand_from_description(description, master_brands)
+                    if suggested_brand and suggested_brand.lower() != selected_brand_lower:
+                        df.at[idx, "Suggested Brand"] = suggested_brand
+                
+                llm_checks += 1
+                
+                # Rate limiting - avoid hitting API too fast
+                if llm_checks < len(uncertain_indices):
+                    time.sleep(0.2)
         
         correct_count = len(df[df["Correct Brand?"] == "Y"])
         incorrect_count = len(df[df["Correct Brand?"] == "N"])
@@ -526,6 +697,7 @@ def brand_accuracy_cleanup(
         log_event("INFO", "Brand cleanup completed",
                   correct_brands=correct_count,
                   incorrect_brands=incorrect_count,
+                  llm_checks=len(uncertain_indices) if use_llm else 0,
                   total_rows=len(df))
         
         return df
@@ -701,6 +873,13 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     
     st.sidebar.header("⚙️ Advanced Settings")
     
+    # Add LLM toggle
+    use_llm = st.sidebar.checkbox(
+        "🤖 Use AI for uncertain cases",
+        value=True,
+        help="Use GPT-4o to verify products when pattern matching is uncertain (costs ~$0.005 per product)"
+    )
+    
     log_changes_only = st.sidebar.checkbox(
         "Log only changes",
         value=True,
@@ -735,7 +914,7 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
         st.rerun()
     
     return (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
-            selected_brand, log_changes_only, max_logs, run_cleanup)
+            selected_brand, log_changes_only, max_logs, run_cleanup, use_llm)
 
 def render_results(df: pd.DataFrame):
     st.subheader("📊 Results")
@@ -822,7 +1001,7 @@ def main():
         brand_df = load_brand_reference(show_upload=True)
         
         (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
-         selected_brand, log_changes_only, max_logs, run_cleanup) = render_sidebar_controls(brand_df)
+         selected_brand, log_changes_only, max_logs, run_cleanup, use_llm) = render_sidebar_controls(brand_df)
         
         st.header("🛡️ Data Cleanup Status")
         
@@ -934,7 +1113,8 @@ def main():
                         selected_manufacturer, 
                         selected_brand,
                         log_changes_only, 
-                        max_logs
+                        max_logs,
+                        use_llm
                     )
                 
                 elif cleanup_type == "Category Hierarchy Cleanup":
