@@ -213,8 +213,8 @@ def detect_header_row(file_bytes: bytes, file_name: str) -> int:
         log_event("ERROR", f"Error detecting header row: {str(e)}")
         return 0
 
-@st.cache_data(show_spinner=False)
 def read_excel_file(file_path_or_buffer) -> Optional[pd.DataFrame]:
+    """Read Excel file for brand reference - NO CACHING to always get latest data"""
     try:
         df = pd.read_excel(file_path_or_buffer)
         df.columns = [str(col).strip().upper() for col in df.columns]
@@ -582,13 +582,25 @@ def brand_accuracy_cleanup(
                 # Extract brand from description
                 suggested_brand = extract_brand_from_description(description, master_brands)
                 
-                # Never leave suggested brand empty
-                if suggested_brand and suggested_brand.lower() != selected_brand_lower:
+                # Check if suggested brand is meaningfully different from selected brand
+                # Don't reject if it just contains the brand name (e.g., "Bloem Terra" vs "Terra")
+                if suggested_brand:
+                    suggested_lower = suggested_brand.lower()
+                    # Only reject if it's the exact same brand (not just contained)
+                    if suggested_lower == selected_brand_lower:
+                        suggested_brand = None
+                    # Also check if it's a single word that matches (e.g., "Terra" == "Terra")
+                    elif len(suggested_brand.split()) == 1 and suggested_lower == selected_brand_lower:
+                        suggested_brand = None
+                
+                if suggested_brand:
                     df.at[idx, "Suggested Brand"] = suggested_brand
                 else:
-                    # Fallback: try to get first capitalized word or use category hint
-                    if categories and categories[0]:
-                        df.at[idx, "Suggested Brand"] = f"Check: {categories[0]} product"
+                    # Last resort: use description hint, not category
+                    # Extract first few words from description as hint
+                    desc_words = description.split()[:3]
+                    if desc_words:
+                        df.at[idx, "Suggested Brand"] = f"Check: {' '.join(desc_words)}..."
                     else:
                         df.at[idx, "Suggested Brand"] = "Manual Review Required"
         
@@ -735,16 +747,14 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
 def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     st.sidebar.header("📁 File Upload")
     
-    # Check if we should reset
-    if st.session_state.get("_clear_triggered", False):
-        st.session_state["_clear_triggered"] = False
-        st.session_state.pop("_last_file_key", None)
-        st.session_state.pop("_raw_df", None)
+    # Initialize reset counter if not exists
+    if "_reset_counter" not in st.session_state:
+        st.session_state["_reset_counter"] = 0
     
     uploaded_file = st.sidebar.file_uploader(
         "Upload data file from Snowflake export",
         type=["xlsx", "xls", "csv"],
-        key="file_uploader"
+        key=f"file_uploader_{st.session_state['_reset_counter']}"
     )
     
     raw_df = None
