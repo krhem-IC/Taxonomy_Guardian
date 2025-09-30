@@ -735,9 +735,16 @@ def vague_description_cleanup(df: pd.DataFrame) -> pd.DataFrame:
 def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     st.sidebar.header("📁 File Upload")
     
+    # Check if we should reset
+    if st.session_state.get("_clear_triggered", False):
+        st.session_state["_clear_triggered"] = False
+        st.session_state.pop("_last_file_key", None)
+        st.session_state.pop("_raw_df", None)
+    
     uploaded_file = st.sidebar.file_uploader(
         "Upload data file from Snowflake export",
-        type=["xlsx", "xls", "csv"]
+        type=["xlsx", "xls", "csv"],
+        key="file_uploader"
     )
     
     raw_df = None
@@ -826,11 +833,9 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     )
     
     if clear_form:
-        keys_to_clear = ["_last_file_key", "_raw_df"]
-        for key in keys_to_clear:
-            if key in st.session_state:
-                del st.session_state[key]
-        clear_logs()  # Also clear logs
+        # Set flag to clear everything on next render
+        st.session_state["_clear_triggered"] = True
+        clear_logs()
         st.rerun()
     
     return (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
