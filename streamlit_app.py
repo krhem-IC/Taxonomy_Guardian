@@ -384,8 +384,10 @@ def get_brand_website(brand_df: pd.DataFrame, brand_name: str) -> str:
 
 # Brand Processing Functions
 def extract_brand_from_description(description: str, master_brands: set) -> Optional[str]:
+    """Extract brand from description - tries master brands first, then any capitalized words"""
     desc_lower = description.lower()
     
+    # First, try to find known brands from master list
     best_brand = None
     best_length = 0
     
@@ -398,6 +400,34 @@ def extract_brand_from_description(description: str, master_brands: set) -> Opti
     
     if best_brand:
         return best_brand.title()
+    
+    # If no known brand found, look for capitalized words at start (likely brand names)
+    # Split description and look for consecutive capitalized words at beginning
+    words = description.split()
+    brand_words = []
+    
+    for word in words[:5]:  # Check first 5 words only
+        # Skip common non-brand words
+        skip_words = {'the', 'a', 'an', 'with', 'for', 'and', 'or', 'in', 'on', 'at', 'to', 'of'}
+        if word.lower() in skip_words:
+            continue
+        
+        # If word starts with capital or is all caps (but not common words like "NEW", "PACK")
+        if word[0].isupper() or word.isupper():
+            # Skip common descriptive words
+            descriptive_words = {'new', 'pack', 'box', 'case', 'original', 'organic', 'natural', 'fresh'}
+            if word.lower() not in descriptive_words:
+                brand_words.append(word)
+                # Stop at first 2-3 words that could be brand name
+                if len(brand_words) >= 2:
+                    break
+        else:
+            # Stop if we hit a lowercase word (end of brand name)
+            if brand_words:
+                break
+    
+    if brand_words:
+        return ' '.join(brand_words)
     
     return None
 
@@ -544,16 +574,22 @@ def brand_accuracy_cleanup(
                 uncertain_indices.append(idx)
                 df.at[idx, "Match Strength"] = "Uncertain"
             else:
-                # Mark as incorrect and suggest alternative brand
+                # Mark as incorrect and ALWAYS suggest alternative brand
                 df.at[idx, "Correct Brand?"] = "N"
                 df.at[idx, "Match Strength"] = "Low"
                 
-                # Always try to suggest alternative brand (even without AI)
+                # Extract brand from description
                 suggested_brand = extract_brand_from_description(description, master_brands)
+                
+                # Never leave suggested brand empty
                 if suggested_brand and suggested_brand.lower() != selected_brand_lower:
                     df.at[idx, "Suggested Brand"] = suggested_brand
-                elif not suggested_brand:
-                    df.at[idx, "Suggested Brand"] = "Unknown Brand"
+                else:
+                    # Fallback: try to get first capitalized word or use category hint
+                    if categories and categories[0]:
+                        df.at[idx, "Suggested Brand"] = f"Check: {categories[0]} product"
+                    else:
+                        df.at[idx, "Suggested Brand"] = "Manual Review Required"
         
         # Pass 2: LLM verification
         if use_llm and uncertain_indices:
