@@ -830,6 +830,7 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
+        clear_logs()  # Also clear logs
         st.rerun()
     
     return (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
