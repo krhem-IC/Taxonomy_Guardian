@@ -835,7 +835,7 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
     return (uploaded_file, raw_df, cleanup_type, selected_manufacturer, 
             selected_brand, log_changes_only, max_logs, run_cleanup, use_llm)
 
-def render_results(df: pd.DataFrame):
+def render_results(df: pd.DataFrame, brand_name: str = ""):
     st.subheader("📊 Results")
     
     col1, col2, col3, col4 = st.columns(4)
@@ -868,10 +868,16 @@ def render_results(df: pd.DataFrame):
         with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Cleaned_Data')
         
+        # Generate filename with brand name or default
+        if brand_name:
+            filename = f"{brand_name.replace(' ', '')}_TaxonomyGuardianCleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        else:
+            filename = f"TaxonomyGuardianCleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        
         st.download_button(
             "📥 Download Cleaned File (.xlsx)",
             data=output_buffer.getvalue(),
-            file_name=f"{selected_brand.replace(' ', '')}_TaxonomyGuardianCleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            file_name=filename,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
@@ -1045,7 +1051,7 @@ def main():
             st.success("Cleanup completed successfully!")
             log_event("SUCCESS", f"{cleanup_type} cleanup completed successfully")
             
-            render_results(cleaned_df)
+            render_results(cleaned_df, selected_brand if cleanup_type == "Brand Accuracy" else "")
         
         except Exception as e:
             error_msg = f"Error during {cleanup_type.lower()}: {str(e)}"
