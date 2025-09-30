@@ -451,16 +451,15 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
         
         # Direct match in description
         if pt_lower in desc_lower:
-            # If we have category info, validate it matches
+            # If we have category info, check if it BOOSTS confidence (but don't reject if no match)
             if category_text:
-                # Check if product type or related terms appear in categories
                 type_words = pt_lower.split()
+                # Check for category match to boost confidence
                 category_match = any(word in category_text for word in type_words if len(word) > 3)
                 if category_match:
-                    return True, 0.95, product_type
+                    return True, 0.95, product_type  # Perfect match - description + category
                 else:
-                    # Type in description but not in categories - lower confidence
-                    return True, 0.70, product_type
+                    return True, 0.88, product_type  # Good match - description only, category doesn't confirm
             return True, 0.90, product_type
         
         # Handle plural/singular variations
@@ -478,7 +477,7 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
         if len(words) > 1:
             all_words_present = all(word in desc_lower for word in words)
             if all_words_present:
-                return True, 0.80, product_type
+                return True, 0.83, product_type
         
         # Check for common variations
         variations = {
@@ -490,14 +489,16 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
             'energy': ['energy', 'energizing'],
             'protein': ['protein', 'proteins'],
             'wine': ['wine', 'wines', 'vino'],
-            'beer': ['beer', 'beers', 'ale', 'lager']
+            'beer': ['beer', 'beers', 'ale', 'lager'],
+            'seltzer': ['seltzer', 'seltzers', 'spiked'],
+            'coffee': ['coffee', 'espresso', 'cappuccino']
         }
         
         for base_word, var_list in variations.items():
             if base_word in pt_lower:
                 for variant in var_list:
                     if variant in desc_lower:
-                        return True, 0.75, product_type
+                        return True, 0.80, product_type
     
     return False, 0.0, ""
 
@@ -870,7 +871,7 @@ def render_results(df: pd.DataFrame):
         st.download_button(
             "📥 Download Cleaned File (.xlsx)",
             data=output_buffer.getvalue(),
-            file_name=f"taxonomy_guardian_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            file_name=f"{selected_brand.replace(' ', '')}_TaxonomyGuardianCleanup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
