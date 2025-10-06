@@ -369,7 +369,15 @@ def get_allowed_product_types(brand_df: pd.DataFrame, brand_name: str) -> List[s
     if not allowed_types_raw or allowed_types_raw == "nan":
         return []
     
-    return [t.strip().lower() for t in allowed_types_raw.split(",") if t.strip()]
+    # More aggressive cleaning: strip whitespace AND handle multiple delimiters
+    types = []
+    for t in allowed_types_raw.split(","):
+        cleaned = t.strip().lower()
+        if cleaned and cleaned != "nan":
+            types.append(cleaned)
+    
+    log_event("INFO", f"Parsed allowed types for {brand_name}", types=types)
+    return types
 
 def get_brand_website(brand_df: pd.DataFrame, brand_name: str) -> str:
     if brand_df is None or "WEBSITE" not in brand_df.columns:
@@ -596,13 +604,18 @@ def brand_accuracy_cleanup(
                 if suggested_brand:
                     df.at[idx, "Suggested Brand"] = suggested_brand
                 else:
-                    # Last resort: use description hint, not category
-                    # Extract first few words from description as hint
-                    desc_words = description.split()[:3]
+                    # Last resort: extract first capitalized words from description
+                    desc_words = []
+                    for word in description.split()[:5]:
+                        if word and word[0].isupper():
+                            desc_words.append(word)
+                            if len(desc_words) >= 2:
+                                break
+                    
                     if desc_words:
-                        df.at[idx, "Suggested Brand"] = f"Check: {' '.join(desc_words)}..."
+                        df.at[idx, "Suggested Brand"] = ' '.join(desc_words)
                     else:
-                        df.at[idx, "Suggested Brand"] = "Manual Review Required"
+                        df.at[idx, "Suggested Brand"] = "Unknown Brand"
         
         # Pass 2: LLM verification
         if use_llm and uncertain_indices:
