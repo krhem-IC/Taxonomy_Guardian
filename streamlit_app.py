@@ -459,7 +459,7 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
                 if category_match:
                     return True, 0.95, product_type  # Perfect match - description + category
                 else:
-                    return True, 0.88, product_type  # Good match - description only, category doesn't confirm
+                    return True, 0.82, product_type  # Uncertain - send to LLM for verification
             return True, 0.90, product_type
         
         # Handle plural/singular variations
