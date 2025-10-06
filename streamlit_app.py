@@ -458,6 +458,7 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
     Returns: (match_found, confidence, matched_type)
     """
     if not allowed_types:
+        log_event("WARNING", "smart_pattern_match called with empty allowed_types")
         return False, 0.0, ""
     
     desc_lower = description.lower()
@@ -467,11 +468,22 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
     if categories:
         category_text = " ".join([c.lower() for c in categories if c]).strip()
     
+    # Debug: log first 3 checks
+    global _debug_count
+    if '_debug_count' not in globals():
+        _debug_count = 0
+    
     for product_type in allowed_types:
         pt_lower = product_type.lower().strip()
         
         # Direct match in description
         if pt_lower in desc_lower:
+            # Debug logging for first few matches
+            if _debug_count < 3:
+                log_event("INFO", f"Pattern match found: '{pt_lower}' in '{desc_lower[:50]}'", 
+                         has_category=bool(category_text))
+                _debug_count += 1
+            
             # If we have category info, check if it BOOSTS confidence (but don't reject if no match)
             if category_text:
                 type_words = pt_lower.split()
