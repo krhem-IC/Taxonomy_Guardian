@@ -358,18 +358,31 @@ def get_master_brand_set(brand_df: Optional[pd.DataFrame]) -> set:
     return set(brand_df["BRAND"].astype(str).str.strip().str.lower())
 
 def get_allowed_product_types(brand_df: pd.DataFrame, brand_name: str) -> List[str]:
-    if brand_df is None or "ALLOWED_PRODUCT_TYPES" not in brand_df.columns:
+    log_event("INFO", f"get_allowed_product_types called for: {brand_name}")
+    
+    if brand_df is None:
+        log_event("ERROR", "brand_df is None")
+        return []
+    
+    if "ALLOWED_PRODUCT_TYPES" not in brand_df.columns:
+        log_event("ERROR", "ALLOWED_PRODUCT_TYPES column not found in brand reference file")
         return []
     
     brand_rows = brand_df[brand_df["BRAND"].str.lower() == brand_name.lower()]
+    
     if brand_rows.empty:
+        log_event("ERROR", f"No rows found for brand: {brand_name}")
         return []
+    
+    log_event("INFO", f"Found {len(brand_rows)} row(s) for {brand_name}")
     
     allowed_types_raw = safe_str(brand_rows.iloc[0].get("ALLOWED_PRODUCT_TYPES", ""))
+    log_event("INFO", f"Raw allowed_types value: '{allowed_types_raw}'")
+    
     if not allowed_types_raw or allowed_types_raw == "nan":
+        log_event("WARNING", f"Allowed types empty or nan for {brand_name}")
         return []
     
-    # More aggressive cleaning: strip whitespace AND handle multiple delimiters
     types = []
     for t in allowed_types_raw.split(","):
         cleaned = t.strip().lower()
