@@ -92,7 +92,8 @@ def ensure_output_columns(df: pd.DataFrame) -> pd.DataFrame:
                 df[col] = ""
     return df
 
-# OpenAI Integration
+# OpenAI Integration - Two-Stage LLM Approach
+
 def get_openai_client():
     try:
         from openai import OpenAI
@@ -108,53 +109,63 @@ def get_openai_client():
         log_event("ERROR", f"Failed to initialize OpenAI: {str(e)}")
         return None
 
-def check_brand_with_llm(
-    description: str, 
+def get_master_brands_sample(master_brands: set, limit: int = 50) -> List[str]:
+    """Get a sample of brands from the master list for LLM context"""
+    if not master_brands:
+        return []
+    # Return top N brands alphabetically for consistency
+    return sorted(list(master_brands))[:limit]
+
+def verify_brand_with_llm(
+    description: str,
     brand_name: str,
     manufacturer: str,
     allowed_types: List[str],
     barcode: str = "",
     website: str = ""
 ) -> Tuple[bool, str, float]:
+    """Stage 1: Verify if product belongs to specified brand"""
     client = get_openai_client()
     if not client:
         return False, "OpenAI not available", 0.0
     
     try:
-        website_context = f"- Website: {website}" if website else ""
+        website_info = f"Website: {website}" if website else "Website: N/A"
         
-        prompt = f"""You are a product classification expert verifying brand ownership.
+        prompt = f"""You are a product taxonomy expert verifying brand ownership.
 
-Product Information:
-- Description: "{description}"
-- Barcode: {barcode if barcode else "Not available"}
+PRODUCT:
+Description: "{description}"
+Barcode: {barcode if barcode else "N/A"}
 
-Brand to Verify:
-- Brand: {brand_name}
-- Manufacturer: {manufacturer}
-{website_context}
-- Allowed Product Types: {', '.join(allowed_types) if allowed_types else 'Not specified'}
+BRAND TO VERIFY:
+Brand: {brand_name}
+Manufacturer: {manufacturer}
+{website_info}
+Allowed Products: {', '.join(allowed_types) if allowed_types else "Not specified"}
 
-Analyze in this order:
-1. Does the description mention "{brand_name}" or recognizable variations of the brand name?
-2. If no brand mentioned and barcode is available, does the barcode help identify this as {brand_name}?
-3. Does the product match one of the allowed product types?
-4. Is there any competing brand name mentioned in the description?
+VERIFICATION PRIORITY:
+1. Check if description clearly mentions "{brand_name}" or recognizable variations
+2. If description is vague/unclear, consider if barcode suggests this manufacturer
+3. Verify the product type matches one of the allowed products
+4. Check for competing brand names in the description
 
-Use MODERATE strictness:
-- Brand name clearly in description → High confidence YES
-- Generic description + correct product type + no competitor + helpful barcode → Acceptable YES
-- Wrong product type OR competitor brand mentioned → NO
+GUIDELINES:
+- Description clearly mentions {brand_name} → YES
+- Vague description + barcode suggests right manufacturer + correct product type → LIKELY YES
+- Different brand name mentioned → NO
+- Wrong product type → NO
+- Generic unbranded item (BANANAS, MILK, EGGS) → NO
 
-Respond in this exact format:
+RESPOND:
 BELONGS: YES or NO
 CONFIDENCE: 0.0 to 1.0
-REASONING: Brief explanation (one sentence)"""
+REASONING: One sentence (mention if you used barcode evidence)"""
 
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a product taxonomy expert who helps classify products accurately. Use moderate strictness when evaluating brand ownership."},
+                {"role": "system", "content": "You are a product taxonomy expert. Analyze carefully and use barcode context when descriptions are unclear."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -168,14 +179,83 @@ REASONING: Brief explanation (one sentence)"""
         confidence = float(confidence_line.split()[0])
         reasoning = result.split("REASONING:")[1].strip()
         
-        log_event("INFO", f"LLM check: {brand_name}", 
-                 belongs=belongs, confidence=confidence, reasoning=reasoning[:100])
-        
         return belongs, reasoning, confidence
         
     except Exception as e:
-        log_event("ERROR", f"LLM check failed: {str(e)}")
+        log_event("ERROR", f"Stage 1 LLM verification failed: {str(e)}")
         return False, f"Error: {str(e)}", 0.0
+
+def suggest_brand_with_llm(
+    description: str,
+    barcode: str,
+    categories: List[str],
+    rejected_from_brand: str,
+    master_brands_sample: List[str]
+) -> Tuple[str, str, float]:
+    """Stage 2: Suggest correct brand if verification failed"""
+    client = get_openai_client()
+    if not client:
+        return "Unknown", "OpenAI not available", 0.0
+    
+    try:
+        category_hierarchy = " > ".join([c for c in categories[:3] if c])
+        brands_list = ", ".join(master_brands_sample[:50]) if master_brands_sample else "Not available"
+        
+        prompt = f"""You are a brand identification expert.
+
+PRODUCT:
+Description: "{description}"
+Barcode: {barcode if barcode else "N/A"}
+Category: {category_hierarchy if category_hierarchy else "Unknown"}
+Rejected from: {rejected_from_brand}
+
+KNOWN BRANDS IN SYSTEM:
+{brands_list}
+
+IDENTIFICATION PRIORITY:
+1. **PRIMARY**: Look for explicit brand names in the description
+   - Capitalized words at the start often indicate brands
+   - Match against the known brands list when possible
+2. **SECONDARY**: If description is vague (e.g., "SELTZER 12PK"), use barcode context
+   - First 6-10 digits identify the manufacturer
+   - Use your knowledge of barcode patterns for major brands
+3. **TERTIARY**: Use category context to validate your suggestion
+   - Does the suggested brand make sense for this product category?
+
+RULES:
+- Extract ONLY the brand name (no sizes, quantities, or descriptors)
+  Good: "Coca-Cola" | Bad: "Coca-Cola 12oz Can"
+- If it's a generic unbranded item (BANANAS, EGGS, MILK) → return "GENERIC_ITEM"
+- If you see a brand not in the known brands list → return it anyway
+- If completely uncertain → return "Unknown"
+
+RESPOND:
+SUGGESTED_BRAND: [brand name, "GENERIC_ITEM", or "Unknown"]
+CONFIDENCE: 0.0 to 1.0
+REASONING: One sentence (mention if you used barcode or category context)"""
+
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are a brand identification expert. Use all available context - description, barcode patterns, and category information."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=150
+        )
+        
+        result = response.choices[0].message.content.strip()
+        
+        suggested_brand = result.split("SUGGESTED_BRAND:")[1].split("\n")[0].strip()
+        confidence_line = result.split("CONFIDENCE:")[1].split("\n")[0].strip()
+        confidence = float(confidence_line.split()[0])
+        reasoning = result.split("REASONING:")[1].strip()
+        
+        return suggested_brand, reasoning, confidence
+        
+    except Exception as e:
+        log_event("ERROR", f"Stage 2 LLM suggestion failed: {str(e)}")
+        return "Unknown", f"Error: {str(e)}", 0.0
 
 # File I/O
 def detect_header_row(file_bytes: bytes, file_name: str) -> int:
@@ -574,6 +654,7 @@ def brand_accuracy_cleanup(
               website=brand_website if brand_website else "Not available")
     
     uncertain_indices = []
+    stage2_calls = 0
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -664,11 +745,16 @@ def brand_accuracy_cleanup(
                         log_event("WARNING", "❌ Could not extract any brand",
                                  description=description[:60])
         
-        # Pass 2: LLM verification
+        # Pass 2: LLM verification (Two-Stage Approach)
         if use_llm and uncertain_indices:
             st.info(f"🤖 {len(uncertain_indices)} products need AI verification")
             
+            # Get master brands sample for Stage 2
+            master_brands_sample = get_master_brands_sample(master_brands, limit=50)
+            
             llm_checks = 0
+            stage2_calls = 0
+            
             for idx in uncertain_indices:
                 progress = 0.5 + ((llm_checks + 1) / len(uncertain_indices)) * 0.5
                 progress_bar.progress(progress)
@@ -678,11 +764,19 @@ def brand_accuracy_cleanup(
                 description = safe_str(row.get("DESCRIPTION", ""))
                 barcode = safe_str(row.get("BARCODE", ""))
                 
-                log_event("INFO", "🤖 Sending to LLM for verification",
+                # Get category information
+                categories = [
+                    safe_str(row.get("CATEGORY_1", "")),
+                    safe_str(row.get("CATEGORY_2", "")),
+                    safe_str(row.get("CATEGORY_3", ""))
+                ]
+                
+                # STAGE 1: Verify if product belongs to selected brand
+                log_event("INFO", "🤖 Stage 1: Verifying brand",
                          description=description[:60],
                          selected_brand=selected_brand)
                 
-                belongs, reasoning, llm_confidence = check_brand_with_llm(
+                belongs, verify_reasoning, verify_confidence = verify_brand_with_llm(
                     description=description,
                     brand_name=selected_brand,
                     manufacturer=selected_manufacturer,
@@ -692,26 +786,49 @@ def brand_accuracy_cleanup(
                 )
                 
                 if belongs:
+                    # Stage 1 confirmed - product belongs to brand
                     df.at[idx, "Correct Brand?"] = "Y"
-                    df.at[idx, "Match Strength"] = f"AI-Verified ({llm_confidence:.0%})"
-                    log_event("INFO", "✅ LLM verified brand",
+                    df.at[idx, "Match Strength"] = f"AI-Verified ({verify_confidence:.0%})"
+                    log_event("INFO", "✅ Stage 1 complete: Brand verified",
                              description=description[:60],
-                             confidence=llm_confidence)
+                             confidence=verify_confidence,
+                             reasoning=verify_reasoning[:100])
                 else:
+                    # Stage 1 rejected - proceed to Stage 2 for suggestion
                     df.at[idx, "Correct Brand?"] = "N"
-                    df.at[idx, "Match Strength"] = f"AI-Rejected ({llm_confidence:.0%})"
-                    log_event("INFO", "❌ LLM rejected brand - extracting suggestion",
+                    df.at[idx, "Match Strength"] = f"AI-Rejected ({verify_confidence:.0%})"
+                    log_event("INFO", "❌ Stage 1: Brand rejected",
                              description=description[:60],
-                             reasoning=reasoning[:100])
+                             reasoning=verify_reasoning[:100])
                     
-                    suggested_brand = extract_brand_from_description(description, master_brands)
-                    if suggested_brand and suggested_brand.lower() != selected_brand_lower:
+                    # STAGE 2: Suggest correct brand
+                    log_event("INFO", "🤖 Stage 2: Identifying correct brand",
+                             description=description[:60])
+                    
+                    suggested_brand, suggest_reasoning, suggest_confidence = suggest_brand_with_llm(
+                        description=description,
+                        barcode=barcode,
+                        categories=categories,
+                        rejected_from_brand=selected_brand,
+                        master_brands_sample=master_brands_sample
+                    )
+                    
+                    # Only suggest if it's different from the selected brand
+                    if suggested_brand and suggested_brand.lower() not in [selected_brand_lower, "unknown"]:
                         df.at[idx, "Suggested Brand"] = suggested_brand
-                        log_event("INFO", "✅ Brand suggestion after LLM rejection",
-                                 suggested_brand=suggested_brand)
+                        log_event("INFO", "✅ Stage 2 complete: Brand suggested",
+                                 suggested_brand=suggested_brand,
+                                 confidence=suggest_confidence,
+                                 reasoning=suggest_reasoning[:100])
+                    else:
+                        log_event("INFO", "⚠️ Stage 2: No alternative brand identified",
+                                 result=suggested_brand)
+                    
+                    stage2_calls += 1
                 
                 llm_checks += 1
                 
+                # Rate limiting
                 if llm_checks < len(uncertain_indices):
                     time.sleep(0.2)
         
@@ -721,7 +838,8 @@ def brand_accuracy_cleanup(
         log_event("INFO", "Brand cleanup completed",
                   correct_brands=correct_count,
                   incorrect_brands=incorrect_count,
-                  llm_checks=len(uncertain_indices) if use_llm else 0)
+                  stage1_verifications=len(uncertain_indices) if use_llm else 0,
+                  stage2_suggestions=stage2_calls if use_llm else 0)
         
         return df
         
@@ -859,12 +977,11 @@ def render_sidebar_controls(brand_df: Optional[pd.DataFrame]):
         st.sidebar.subheader("Brand Settings")
         
         if brand_df is not None and not brand_df.empty:
-            show_top_only = st.sidebar.checkbox("Show only top 50 manufacturers", value=True)
-            
             top_manufacturers, brands_by_manufacturer = get_manufacturer_brand_lists(brand_df)
             
-            if top_manufacturers or brands_by_manufacturer:
-                manufacturer_options = top_manufacturers if show_top_only else sorted(brands_by_manufacturer.keys())
+            if brands_by_manufacturer:
+                # Show ALL manufacturers (not just top 50)
+                manufacturer_options = sorted(brands_by_manufacturer.keys())
                 
                 if manufacturer_options:
                     selected_manufacturer = st.sidebar.selectbox(
