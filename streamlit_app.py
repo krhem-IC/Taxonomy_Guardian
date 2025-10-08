@@ -1,5 +1,5 @@
 # streamlit_app.py
-# Taxonomy Guardian v25 - Complete clean version with OpenAI integration
+# Taxonomy Guardian v27 - With seltzer debug logging
 
 import io
 import re
@@ -420,36 +420,39 @@ def extract_brand_from_description(description: str, master_brands: set) -> Opti
                 best_length = len(brand)
     
     if best_brand:
+        log_event("INFO", "✅ Brand extracted from master list", 
+                 description_snippet=description[:50],
+                 extracted_brand=best_brand.title())
         return best_brand.title()
     
     # If no known brand found, look for capitalized words at start (likely brand names)
-    # Split description and look for consecutive capitalized words at beginning
     words = description.split()
     brand_words = []
     
     for word in words[:5]:  # Check first 5 words only
-        # Skip common non-brand words
         skip_words = {'the', 'a', 'an', 'with', 'for', 'and', 'or', 'in', 'on', 'at', 'to', 'of'}
         if word.lower() in skip_words:
             continue
         
-        # If word starts with capital or is all caps (but not common words like "NEW", "PACK")
         if word[0].isupper() or word.isupper():
-            # Skip common descriptive words
             descriptive_words = {'new', 'pack', 'box', 'case', 'original', 'organic', 'natural', 'fresh'}
             if word.lower() not in descriptive_words:
                 brand_words.append(word)
-                # Stop at first 2-3 words that could be brand name
                 if len(brand_words) >= 2:
                     break
         else:
-            # Stop if we hit a lowercase word (end of brand name)
             if brand_words:
                 break
     
     if brand_words:
-        return ' '.join(brand_words)
+        suggested = ' '.join(brand_words)
+        log_event("INFO", "💡 Brand extracted from capitalization", 
+                 description_snippet=description[:50],
+                 extracted_brand=suggested)
+        return suggested
     
+    log_event("WARNING", "❌ No brand could be extracted", 
+             description_snippet=description[:50])
     return None
 
 def smart_pattern_match(description: str, allowed_types: List[str], categories: List[str] = None) -> Tuple[bool, float, str]:
@@ -463,27 +466,31 @@ def smart_pattern_match(description: str, allowed_types: List[str], categories: 
     
     desc_lower = description.lower()
     
+    # DEBUG: Log seltzer product details
+    if "seltzer" in desc_lower:
+        log_event("INFO", "🍹 SELTZER DEBUG", 
+                 description=desc_lower[:80],
+                 allowed_types_sample=allowed_types[:3],
+                 total_types=len(allowed_types))
+    
     # Extract category keywords if provided
     category_text = ""
     if categories:
         category_text = " ".join([c.lower() for c in categories if c]).strip()
     
-    # Debug: log first 3 checks
-    global _debug_count
-    if '_debug_count' not in globals():
-        _debug_count = 0
-    
     for product_type in allowed_types:
         pt_lower = product_type.lower().strip()
         
+        # DEBUG: Log each seltzer comparison
+        if "seltzer" in desc_lower and "seltzer" in pt_lower:
+            contains_result = pt_lower in desc_lower
+            log_event("INFO", "🔍 SELTZER COMPARISON",
+                     pt_lower=f"'{pt_lower}'",
+                     desc_snippet=f"'{desc_lower[:60]}'",
+                     match_found=contains_result)
+        
         # Direct match in description
         if pt_lower in desc_lower:
-            # Debug logging for first few matches
-            if _debug_count < 3:
-                log_event("INFO", f"Pattern match found: '{pt_lower}' in '{desc_lower[:50]}'", 
-                         has_category=bool(category_text))
-                _debug_count += 1
-            
             # If we have category info, check if it BOOSTS confidence (but don't reject if no match)
             if category_text:
                 type_words = pt_lower.split()
@@ -612,22 +619,31 @@ def brand_accuracy_cleanup(
                 df.at[idx, "Correct Brand?"] = "N"
                 df.at[idx, "Match Strength"] = "Low"
                 
+                log_event("INFO", "🔍 No pattern match - extracting suggested brand",
+                         description=description[:60],
+                         selected_brand=selected_brand)
+                
                 # Extract brand from description
                 suggested_brand = extract_brand_from_description(description, master_brands)
                 
                 # Check if suggested brand is meaningfully different from selected brand
-                # Don't reject if it just contains the brand name (e.g., "Bloem Terra" vs "Terra")
                 if suggested_brand:
                     suggested_lower = suggested_brand.lower()
                     # Only reject if it's the exact same brand (not just contained)
                     if suggested_lower == selected_brand_lower:
+                        log_event("INFO", "⚠️ Suggested brand same as selected, skipping",
+                                 suggested=suggested_brand)
                         suggested_brand = None
-                    # Also check if it's a single word that matches (e.g., "Terra" == "Terra")
                     elif len(suggested_brand.split()) == 1 and suggested_lower == selected_brand_lower:
+                        log_event("INFO", "⚠️ Single word match with selected, skipping",
+                                 suggested=suggested_brand)
                         suggested_brand = None
                 
                 if suggested_brand:
                     df.at[idx, "Suggested Brand"] = suggested_brand
+                    log_event("INFO", "✅ Brand suggestion assigned",
+                             description=description[:60],
+                             suggested_brand=suggested_brand)
                 else:
                     # Last resort: extract first capitalized words from description
                     desc_words = []
@@ -638,9 +654,15 @@ def brand_accuracy_cleanup(
                                 break
                     
                     if desc_words:
-                        df.at[idx, "Suggested Brand"] = ' '.join(desc_words)
+                        fallback_brand = ' '.join(desc_words)
+                        df.at[idx, "Suggested Brand"] = fallback_brand
+                        log_event("INFO", "⚡ Fallback brand from caps",
+                                 description=description[:60],
+                                 fallback_brand=fallback_brand)
                     else:
                         df.at[idx, "Suggested Brand"] = "Unknown Brand"
+                        log_event("WARNING", "❌ Could not extract any brand",
+                                 description=description[:60])
         
         # Pass 2: LLM verification
         if use_llm and uncertain_indices:
@@ -656,6 +678,10 @@ def brand_accuracy_cleanup(
                 description = safe_str(row.get("DESCRIPTION", ""))
                 barcode = safe_str(row.get("BARCODE", ""))
                 
+                log_event("INFO", "🤖 Sending to LLM for verification",
+                         description=description[:60],
+                         selected_brand=selected_brand)
+                
                 belongs, reasoning, llm_confidence = check_brand_with_llm(
                     description=description,
                     brand_name=selected_brand,
@@ -668,13 +694,21 @@ def brand_accuracy_cleanup(
                 if belongs:
                     df.at[idx, "Correct Brand?"] = "Y"
                     df.at[idx, "Match Strength"] = f"AI-Verified ({llm_confidence:.0%})"
+                    log_event("INFO", "✅ LLM verified brand",
+                             description=description[:60],
+                             confidence=llm_confidence)
                 else:
                     df.at[idx, "Correct Brand?"] = "N"
                     df.at[idx, "Match Strength"] = f"AI-Rejected ({llm_confidence:.0%})"
+                    log_event("INFO", "❌ LLM rejected brand - extracting suggestion",
+                             description=description[:60],
+                             reasoning=reasoning[:100])
                     
                     suggested_brand = extract_brand_from_description(description, master_brands)
                     if suggested_brand and suggested_brand.lower() != selected_brand_lower:
                         df.at[idx, "Suggested Brand"] = suggested_brand
+                        log_event("INFO", "✅ Brand suggestion after LLM rejection",
+                                 suggested_brand=suggested_brand)
                 
                 llm_checks += 1
                 
