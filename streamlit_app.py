@@ -212,32 +212,65 @@ Rejected from: {rejected_from_brand}
 KNOWN BRANDS IN SYSTEM:
 {brands_list}
 
-IDENTIFICATION PRIORITY:
-1. **PRIMARY**: Look for explicit brand names in the description
+YOUR TASK:
+Identify the correct brand for this product. Be persistent and use all available clues.
+
+IDENTIFICATION STRATEGY:
+1. **Check Description**: Look for brand names, even partial mentions
+   - Full brand names (e.g., "Coca-Cola", "Bloem Terra")
+   - Partial brand names (e.g., "Terra" might be "Bloem" brand's product line)
    - Capitalized words at the start often indicate brands
-   - Match against the known brands list when possible
-2. **SECONDARY**: If description is vague (e.g., "SELTZER 12PK"), use barcode context
+
+2. **Use Barcode Context**: If description is vague, leverage the barcode
    - First 6-10 digits identify the manufacturer
+   - Products with similar barcode prefixes are usually the same brand
    - Use your knowledge of barcode patterns for major brands
-3. **TERTIARY**: Use category context to validate your suggestion
-   - Does the suggested brand make sense for this product category?
 
-RULES:
-- Extract ONLY the brand name (no sizes, quantities, or descriptors)
-  Good: "Coca-Cola" | Bad: "Coca-Cola 12oz Can"
-- If it's a generic unbranded item (BANANAS, EGGS, MILK) → return "GENERIC_ITEM"
-- If you see a brand not in the known brands list → return it anyway
-- If completely uncertain → return "Unknown"
+3. **Match Against Known Brands**: Compare your findings with the known brands list
+   - Prioritize brands from the list when possible
+   - If you see a brand not in the list, still return it
 
-RESPOND:
-SUGGESTED_BRAND: [brand name, "GENERIC_ITEM", or "Unknown"]
+4. **Use Category Context**: Validate your suggestion makes sense
+   - Does this brand sell products in this category?
+   - Garden products → look for garden brands
+   - Beverages → look for beverage brands
+
+CRITICAL RULES:
+- Return ONLY the brand name (no quotes, no descriptors, no sizes)
+  ✓ Good: Bloem
+  ✗ Bad: "Bloem", Bloem Terra, Bloem 20 In
+- Do NOT return generic descriptions as brands
+  ✗ Bad: Plastic Planter, Garden Supply, Plant Saucer
+- If you see product line names (Terra, Premium, Pro), try to identify the parent brand
+- Only return "Unknown" as a last resort if you truly cannot determine any brand
+- Be creative with barcode analysis when description is vague
+
+EXAMPLES:
+Example 1:
+Description: "Bloem Terra 20 In. Charcoal Plastic Planter Saucer"
+Answer: Bloem (brand name clearly stated)
+
+Example 2:
+Description: "Terra 13 In. Pebble Stone Plastic Plant Saucer Tray"
+Answer: Bloem (Terra is Bloem's product line, same product category and likely same barcode prefix)
+
+Example 3:
+Description: "White Claw Hard Seltzer Variety Pack"
+Answer: White Claw (brand name in description)
+
+Example 4:
+Description: "SELTZER VARIETY 12PK", Barcode: "635985002543"
+Answer: White Claw (barcode prefix 635985 indicates White Claw)
+
+RESPOND (no quotes around brand name):
+SUGGESTED_BRAND: [brand name or Unknown]
 CONFIDENCE: 0.0 to 1.0
-REASONING: One sentence (mention if you used barcode or category context)"""
+REASONING: One sentence explaining your identification method"""
 
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a brand identification expert. Use all available context - description, barcode patterns, and category information."},
+                {"role": "system", "content": "You are a brand identification expert. Be persistent and creative in finding brands. Use barcode patterns, product line knowledge, and category context. Never give up too easily."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -246,7 +279,10 @@ REASONING: One sentence (mention if you used barcode or category context)"""
         
         result = response.choices[0].message.content.strip()
         
+        # Extract and clean the suggested brand (remove quotes if present)
         suggested_brand = result.split("SUGGESTED_BRAND:")[1].split("\n")[0].strip()
+        suggested_brand = suggested_brand.strip('"').strip("'")  # Remove quotes
+        
         confidence_line = result.split("CONFIDENCE:")[1].split("\n")[0].strip()
         confidence = float(confidence_line.split()[0])
         reasoning = result.split("REASONING:")[1].strip()
