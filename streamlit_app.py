@@ -146,16 +146,16 @@ Allowed Products: {', '.join(allowed_types) if allowed_types else "Not specified
 
 VERIFICATION PRIORITY:
 1. Check if description clearly mentions "{brand_name}" or recognizable variations
-2. If description is vague/unclear, consider if barcode suggests this manufacturer
-3. Verify the product type matches one of the allowed products
+2. Verify the product type matches one of the allowed products (be flexible with related categories)
+3. If description is vague/unclear, consider if barcode suggests this manufacturer
 4. Check for competing brand names in the description
 
 GUIDELINES:
-- Description clearly mentions {brand_name} → YES
-- Vague description + barcode suggests right manufacturer + correct product type → LIKELY YES
-- Different brand name mentioned → NO
-- Wrong product type → NO
-- Generic unbranded item (BANANAS, MILK, EGGS) → NO
+- Description clearly mentions {brand_name} → LIKELY YES (even if product type slightly different)
+- Brand name + reasonable product type + no competitor → YES
+- Vague description + barcode suggests right manufacturer + plausible product → LIKELY YES
+- Different brand name explicitly mentioned → NO
+- Completely unrelated product type (e.g., furniture for beverage brand) → NO
 
 RESPOND:
 BELONGS: YES or NO
@@ -165,7 +165,7 @@ REASONING: One sentence (mention if you used barcode evidence)"""
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a product taxonomy expert. Analyze carefully and use barcode context when descriptions are unclear."},
+                {"role": "system", "content": "You are a product taxonomy expert. When the brand name is clearly mentioned in the description, trust it - even if the product type seems slightly outside the listed categories. Be flexible with product categories (protein powder and energy drinks are both fitness products)."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
@@ -279,9 +279,10 @@ REASONING: One sentence explaining your identification method"""
         
         result = response.choices[0].message.content.strip()
         
-        # Extract and clean the suggested brand (remove quotes if present)
-        suggested_brand = result.split("SUGGESTED_BRAND:")[1].split("\n")[0].strip()
-        suggested_brand = suggested_brand.strip('"').strip("'")  # Remove quotes
+        # Extract and clean the suggested brand (remove ALL quotes and extra whitespace)
+        suggested_brand_raw = result.split("SUGGESTED_BRAND:")[1].split("\n")[0].strip()
+        # Remove all types of quotes and extra spaces
+        suggested_brand = suggested_brand_raw.replace('"', '').replace("'", '').replace(''', '').replace(''', '').strip()
         
         confidence_line = result.split("CONFIDENCE:")[1].split("\n")[0].strip()
         confidence = float(confidence_line.split()[0])
